@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Raspberry Pi BLE Collector</string>
+    <string name="screen_title">라즈베리 파이 BLE 수집기</string>
+    <string name="target_description">대상: opensrc_week_3 · 환경 센싱 서비스 0x181A</string>
+    <string name="status_ready">대기 중</string>
+    <string name="start_scan">스캔 시작</string>
+    <string name="stop_scan">스캔 중지</string>
+    <string name="save_csv">CSV 저장</string>
+    <string name="latest_sensor">최근 센서 값: 아직 수신되지 않음</string>
+    <string name="scan_records">스캔 기록</string>
+    <string name="event_log">동작 로그</string>
+    <string name="scan_failed_status">스캔 실패 · 오류 코드 %1$d</string>
+    <string name="bluetooth_unsupported">이 기기는 Bluetooth를 지원하지 않습니다.</string>
+    <string name="latest_sensor_format">최근 센서 값\n%1$s\n센서 시각: %2$d · Raw: %3$s</string>
+</resources>

@@ -1,0 +1,11 @@
+.gradle/
+.idea/
+build/
+app/build/
+local.properties
+*.iml
+tmp/
+output/
+.codex-finalizer/
+app/src/test/
+app/src/androidTest/
