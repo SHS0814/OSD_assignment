@@ -8,9 +8,12 @@ public final class BleRecord {
     public final String uuid;
     public final SensorPacket sensor;
     public final String rawHex;
+    public final String scanRecordHex;
+    public final String packetDetails;
 
     public BleRecord(long receivedAtMillis, String name, String address, int rssi,
-                     String uuid, SensorPacket sensor, String rawHex) {
+                     String uuid, SensorPacket sensor, String rawHex,
+                     String scanRecordHex, String packetDetails) {
         this.receivedAtMillis = receivedAtMillis;
         this.name = name;
         this.address = address;
@@ -18,5 +21,7 @@ public final class BleRecord {
         this.uuid = uuid;
         this.sensor = sensor;
         this.rawHex = rawHex;
+        this.scanRecordHex = scanRecordHex;
+        this.packetDetails = packetDetails;
     }
 }

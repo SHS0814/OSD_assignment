@@ -3,6 +3,7 @@ package com.example.rpiblecollector;
 import android.annotation.SuppressLint;
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
@@ -12,8 +13,11 @@ import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -57,6 +61,7 @@ public class MainActivity extends Activity {
     private BluetoothLeScanner bluetoothLeScanner;
     private boolean scanning;
     private long scanStartedAt;
+    private int validPacketCount;
 
     private TextView statusText;
     private TextView latestSensorText;
@@ -75,8 +80,8 @@ public class MainActivity extends Activity {
             }
             long elapsed = System.currentTimeMillis() - scanStartedAt;
             statusText.setText(String.format(Locale.getDefault(),
-                    "스캔 중 · %s · 유효 패킷 %,d개",
-                    formatElapsed(elapsed), collectedRecords.size()));
+                    "스캔 중 · %s · 수신 %,d개 / 유효 %,d개",
+                    formatElapsed(elapsed), collectedRecords.size(), validPacketCount));
             handler.postDelayed(this, 1000L);
         }
     };
@@ -121,6 +126,12 @@ public class MainActivity extends Activity {
         scanListAdapter = new ArrayAdapter<>(this,
                 android.R.layout.simple_list_item_1, visibleRows);
         scanList.setAdapter(scanListAdapter);
+        scanList.setOnItemClickListener((parent, view, position, id) -> {
+            int recordIndex = collectedRecords.size() - 1 - position;
+            if (recordIndex >= 0 && recordIndex < collectedRecords.size()) {
+                showPacketDetails(collectedRecords.get(recordIndex));
+            }
+        });
 
         BluetoothManager manager = getSystemService(BluetoothManager.class);
         bluetoothAdapter = manager == null ? null : manager.getAdapter();
@@ -251,8 +262,8 @@ public class MainActivity extends Activity {
         handler.removeCallbacks(elapsedTicker);
         long elapsed = System.currentTimeMillis() - scanStartedAt;
         statusText.setText(String.format(Locale.getDefault(),
-                "스캔 중지 · %s · 유효 패킷 %,d개",
-                formatElapsed(elapsed), collectedRecords.size()));
+                "스캔 중지 · %s · 수신 %,d개 / 유효 %,d개",
+                formatElapsed(elapsed), collectedRecords.size(), validPacketCount));
         appendLog("BLE 스캔 중지.");
         if (elapsed < RECOMMENDED_COLLECTION_MILLIS) {
             appendLog("안내: PDF 실습 기준 수집 시간은 10분 이상입니다.");
@@ -270,8 +281,9 @@ public class MainActivity extends Activity {
         byte[] serviceData = scanRecord.getServiceData(TARGET_UUID);
         SensorPacket sensor = SensorPacket.parse(serviceData);
         if (sensor == null) {
-            appendLogOnce("0x181A 패킷을 받았지만 ServiceData가 13바이트보다 짧습니다.");
-            return;
+            appendLogOnce("0x181A 패킷을 받았지만 ServiceData가 13바이트보다 짧습니다. 상세 분석용으로 보존합니다.");
+        } else {
+            validPacketCount++;
         }
 
         BluetoothDevice device = result.getDevice();
@@ -284,22 +296,65 @@ public class MainActivity extends Activity {
         }
         String address = hasConnectPermission() ? device.getAddress() : "permission-required";
         String rawHex = toHex(serviceData);
+        String scanRecordHex = toHex(scanRecord.getBytes());
+        long receivedAtMillis = System.currentTimeMillis();
+        String packetDetails = PacketInspector.inspect(result, scanRecord, name, address,
+                TARGET_UUID, TARGET_NAME, receivedAtMillis);
 
-        BleRecord record = new BleRecord(System.currentTimeMillis(), name, address,
-                result.getRssi(), TARGET_UUID.toString(), sensor, rawHex);
+        BleRecord record = new BleRecord(receivedAtMillis, name, address,
+                result.getRssi(), TARGET_UUID.toString(), sensor, rawHex,
+                scanRecordHex, packetDetails);
         collectedRecords.add(record);
 
+        String sensorSummary = sensor == null
+                ? "센서 파싱 불가 · ServiceData "
+                    + (serviceData == null ? 0 : serviceData.length) + " bytes"
+                : sensor.toString();
         String row = String.format(Locale.getDefault(),
                 "%s\nMAC: %s  RSSI: %d dBm\n%s",
-                name, address, result.getRssi(), sensor);
+                name, address, result.getRssi(), sensorSummary);
         visibleRows.add(0, row);
         if (visibleRows.size() > MAX_VISIBLE_ROWS) {
             visibleRows.remove(visibleRows.size() - 1);
         }
         scanListAdapter.notifyDataSetChanged();
-        latestSensorText.setText(getString(R.string.latest_sensor_format,
-                sensor.toString(), sensor.timestamp, rawHex));
+        if (sensor == null) {
+            latestSensorText.setText(getString(R.string.latest_packet_invalid,
+                    serviceData == null ? 0 : serviceData.length, rawHex));
+        } else {
+            latestSensorText.setText(getString(R.string.latest_sensor_format,
+                    sensor.toString(), sensor.timestamp, rawHex));
+        }
         saveButton.setEnabled(true);
+    }
+
+    private void showPacketDetails(BleRecord record) {
+        TextView details = new TextView(this);
+        int padding = (int) (16 * getResources().getDisplayMetrics().density);
+        details.setPadding(padding, padding, padding, padding);
+        details.setTypeface(Typeface.MONOSPACE);
+        details.setTextSize(12f);
+        details.setTextIsSelectable(true);
+        details.setText(record.packetDetails);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(details);
+
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.packet_detail_title)
+                .setView(scroll)
+                .setNegativeButton(R.string.copy, (dialog, which) -> {
+                    ClipboardManager clipboard =
+                            (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                    if (clipboard != null) {
+                        clipboard.setPrimaryClip(ClipData.newPlainText(
+                                "BLE packet details", record.packetDetails));
+                        Toast.makeText(this, "패킷 상세를 복사했습니다.",
+                                Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setPositiveButton(R.string.close, null)
+                .show();
     }
 
     private boolean hasConnectPermission() {
@@ -355,6 +410,9 @@ public class MainActivity extends Activity {
     }
 
     private static String toHex(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return "";
+        }
         StringBuilder builder = new StringBuilder(bytes.length * 2);
         for (byte value : bytes) {
             builder.append(String.format(Locale.US, "%02X", value & 0xFF));

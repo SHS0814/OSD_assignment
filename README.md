@@ -8,6 +8,10 @@
 - `opensrc_week_3` 장치의 이름, MAC, RSSI 및 ServiceData 표시
 - PDF에 제시된 13바이트 little-endian 패킷 파싱
   - 온도, 습도, AQI, TVOC, eCO2, Unix timestamp
+- 각 스캔 기록을 눌러 BLE 패킷 상세 화면 표시
+  - AD 구조별 offset, length, type, 헥스, 디코딩값
+  - Flags, UUID, TX Power, PHY, SID, 제조사 데이터, Service Data
+  - 원본을 HEX·DEC·ASCII·hex dump로 확인 및 복사
 - 실시간 스캔 기록과 동작 로그 표시
 - 수집 경과 시간과 유효 패킷 수 표시
 - 수집 결과를 CSV로 저장
@@ -32,7 +36,8 @@
 ```
 
 Android Studio의 Device Explorer로 내려받을 수 있습니다. 저장 컬럼은 수신 시각, 장치명,
-MAC, RSSI, UUID, 온도, 습도, AQI, TVOC, eCO2, 센서 Unix timestamp, raw hex입니다.
+MAC, RSSI, UUID, 온도, 습도, AQI, TVOC, eCO2, 센서 Unix timestamp,
+ServiceData raw hex, 전체 광고 raw hex, 패킷 상세 해석 결과입니다.
 
 ## 패킷 구조
 
