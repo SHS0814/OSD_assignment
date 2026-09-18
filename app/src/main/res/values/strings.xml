@@ -3,6 +3,7 @@
     <string name="screen_title">라즈베리 파이 BLE 수집기</string>
     <string name="target_description">대상: opensrc_week_3 · 환경 센싱 서비스 0x181A</string>
     <string name="status_ready">대기 중</string>
+    <string name="scan_service_starting">백그라운드 스캔 서비스 시작 중</string>
     <string name="start_scan">스캔 시작</string>
     <string name="stop_scan">스캔 중지</string>
     <string name="save_csv">CSV 저장</string>
@@ -10,11 +11,15 @@
     <string name="scan_records">스캔 기록</string>
     <string name="packet_detail_hint">기록을 누르면 AD 구조·메타데이터·Raw 헥스를 확인하고 복사할 수 있습니다.</string>
     <string name="event_log">동작 로그</string>
-    <string name="scan_failed_status">스캔 실패 · 오류 코드 %1$d</string>
+    <string name="scan_failed_status">스캔 실패 · %1$s</string>
     <string name="bluetooth_unsupported">이 기기는 Bluetooth를 지원하지 않습니다.</string>
     <string name="latest_sensor_format">최근 센서 값\n%1$s\n센서 시각: %2$d · Raw: %3$s</string>
     <string name="latest_packet_invalid">최근 패킷\n센서 패킷 파싱 불가(%1$d바이트)\nServiceData Raw: %2$s</string>
     <string name="packet_detail_title">BLE 패킷 상세</string>
     <string name="copy">복사</string>
     <string name="close">닫기</string>
+    <string name="notification_channel_name">BLE 패킷 수집</string>
+    <string name="notification_channel_description">백그라운드 BLE 패킷 수집 상태를 표시합니다.</string>
+    <string name="notification_title">BLE 패킷 수집 중</string>
+    <string name="notification_stop_and_save">중지 후 저장</string>
 </resources>

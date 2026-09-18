@@ -1,29 +1,22 @@
 package com.example.rpiblecollector;
 
-import android.annotation.SuppressLint;
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
-import android.bluetooth.le.BluetoothLeScanner;
-import android.bluetooth.le.ScanCallback;
-import android.bluetooth.le.ScanFilter;
-import android.bluetooth.le.ScanRecord;
-import android.bluetooth.le.ScanResult;
-import android.bluetooth.le.ScanSettings;
-import android.content.ClipData;
-import android.content.ClipboardManager;
+import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
-import android.os.ParcelUuid;
-import android.text.TextUtils;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -33,35 +26,32 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
-import java.io.IOException;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Date;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final int PERMISSION_REQUEST_CODE = 100;
     private static final int ENABLE_BLUETOOTH_REQUEST_CODE = 101;
-    private static final ParcelUuid TARGET_UUID =
-            ParcelUuid.fromString("0000181a-0000-1000-8000-00805f9b34fb");
-    private static final String TARGET_NAME = "opensrc_week_3";
-    private static final long RECOMMENDED_COLLECTION_MILLIS = 10L * 60L * 1000L;
+    private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 102;
     private static final int MAX_VISIBLE_ROWS = 100;
+    private static final String PREFS_NAME = "collector_preferences";
+    private static final String PREF_NOTIFICATION_PERMISSION_ASKED =
+            "notification_permission_asked";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
     private final List<BleRecord> collectedRecords = new ArrayList<>();
     private final List<String> visibleRows = new ArrayList<>();
 
     private BluetoothAdapter bluetoothAdapter;
-    private BluetoothLeScanner bluetoothLeScanner;
+    private BleScanService scanService;
+    private boolean serviceBound;
     private boolean scanning;
+    private boolean saving;
     private long scanStartedAt;
+    private long scanStoppedAt;
     private int validPacketCount;
+    private String failureMessage;
 
     private TextView statusText;
     private TextView latestSensorText;
@@ -78,34 +68,56 @@ public class MainActivity extends Activity {
             if (!scanning) {
                 return;
             }
-            long elapsed = System.currentTimeMillis() - scanStartedAt;
-            statusText.setText(String.format(Locale.getDefault(),
-                    "스캔 중 · %s · 수신 %,d개 / 유효 %,d개",
-                    formatElapsed(elapsed), collectedRecords.size(), validPacketCount));
+            updateStatusText();
             handler.postDelayed(this, 1000L);
         }
     };
 
-    private final ScanCallback scanCallback = new ScanCallback() {
+    private final BleScanService.Listener serviceListener = new BleScanService.Listener() {
         @Override
-        public void onScanResult(int callbackType, ScanResult result) {
-            processScanResult(result);
+        public void onStateChanged(BleScanService.ScanState state) {
+            applyServiceState(state);
         }
 
         @Override
-        public void onBatchScanResults(List<ScanResult> results) {
-            for (ScanResult result : results) {
-                processScanResult(result);
-            }
-        }
-
-        @Override
-        public void onScanFailed(int errorCode) {
-            scanning = false;
+        public void onRecordReceived(BleRecord record) {
+            collectedRecords.add(record);
+            addVisibleRecord(record);
+            updateLatestSensor(record);
             updateButtons();
-            handler.removeCallbacks(elapsedTicker);
-            statusText.setText(getString(R.string.scan_failed_status, errorCode));
-            appendLog("스캔 실패: " + scanErrorMessage(errorCode));
+        }
+
+        @Override
+        public void onLogLine(String line) {
+            appendLogLine(line);
+        }
+
+        @Override
+        public void onCsvSaved(File file) {
+            Toast.makeText(MainActivity.this,
+                    "CSV 저장 완료\n" + file.getName(), Toast.LENGTH_LONG).show();
+        }
+
+        @Override
+        public void onCsvSaveFailed(String message) {
+            Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+        }
+    };
+
+    private final ServiceConnection serviceConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder binder) {
+            BleScanService.LocalBinder localBinder = (BleScanService.LocalBinder) binder;
+            scanService = localBinder.getService();
+            serviceBound = true;
+            syncFromService();
+            scanService.setListener(serviceListener);
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            serviceBound = false;
+            scanService = null;
         }
     };
 
@@ -143,10 +155,28 @@ public class MainActivity extends Activity {
         if (bluetoothAdapter == null) {
             statusText.setText(R.string.bluetooth_unsupported);
             startButton.setEnabled(false);
-            appendLog("Bluetooth adapter를 만들 수 없습니다.");
+            appendLocalLog("Bluetooth adapter를 만들 수 없습니다.");
         } else {
-            appendLog("준비 완료. 0x181A 광고 패킷을 수집합니다.");
+            appendLocalLog("준비 완료. Foreground Service로 0x181A 광고 패킷을 수집합니다.");
         }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        bindService(new Intent(this, BleScanService.class),
+                serviceConnection, Context.BIND_AUTO_CREATE);
+    }
+
+    @Override
+    protected void onStop() {
+        if (serviceBound) {
+            scanService.setListener(null);
+            unbindService(serviceConnection);
+            serviceBound = false;
+            scanService = null;
+        }
+        super.onStop();
     }
 
     @SuppressLint("MissingPermission")
@@ -156,12 +186,21 @@ public class MainActivity extends Activity {
             return;
         }
         if (!bluetoothAdapter.isEnabled()) {
-            appendLog("Bluetooth 활성화를 요청합니다.");
+            appendLocalLog("Bluetooth 활성화를 요청합니다.");
             startActivityForResult(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE),
                     ENABLE_BLUETOOTH_REQUEST_CODE);
             return;
         }
-        startBleScan();
+        if (shouldRequestNotificationPermission()) {
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(PREF_NOTIFICATION_PERMISSION_ASKED, true)
+                    .apply();
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                    NOTIFICATION_PERMISSION_REQUEST_CODE);
+            return;
+        }
+        startForegroundScan();
     }
 
     private boolean hasBlePermissions() {
@@ -187,23 +226,37 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean shouldRequestNotificationPermission() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+                && !getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getBoolean(PREF_NOTIFICATION_PERMISSION_ASKED, false);
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions,
                                            int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode != PERMISSION_REQUEST_CODE) {
-            return;
-        }
-        boolean granted = grantResults.length > 0;
-        for (int result : grantResults) {
-            granted &= result == PackageManager.PERMISSION_GRANTED;
-        }
-        if (granted) {
-            appendLog("BLE 권한 승인 완료.");
-            prepareAndStartScan();
-        } else {
-            appendLog("BLE 권한이 거부되어 스캔할 수 없습니다.");
-            Toast.makeText(this, "주변 기기 권한을 허용해 주세요.", Toast.LENGTH_LONG).show();
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            boolean granted = grantResults.length > 0;
+            for (int result : grantResults) {
+                granted &= result == PackageManager.PERMISSION_GRANTED;
+            }
+            if (granted) {
+                appendLocalLog("BLE 권한 승인 완료.");
+                prepareAndStartScan();
+            } else {
+                appendLocalLog("BLE 권한이 거부되어 스캔할 수 없습니다.");
+                Toast.makeText(this, "주변 기기 권한을 허용해 주세요.",
+                        Toast.LENGTH_LONG).show();
+            }
+        } else if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
+            if (grantResults.length == 0
+                    || grantResults[0] != PackageManager.PERMISSION_GRANTED) {
+                appendLocalLog("알림 권한이 없어 수집 알림이 제한될 수 있습니다.");
+            }
+            startForegroundScan();
         }
     }
 
@@ -212,120 +265,149 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == ENABLE_BLUETOOTH_REQUEST_CODE) {
             if (resultCode == RESULT_OK) {
-                appendLog("Bluetooth가 활성화되었습니다.");
-                startBleScan();
+                appendLocalLog("Bluetooth가 활성화되었습니다.");
+                prepareAndStartScan();
             } else {
-                appendLog("Bluetooth 활성화가 취소되었습니다.");
+                appendLocalLog("Bluetooth 활성화가 취소되었습니다.");
             }
         }
     }
 
-    @SuppressLint("MissingPermission")
-    private void startBleScan() {
-        if (scanning || !hasBlePermissions()) {
-            return;
-        }
-
-        bluetoothLeScanner = bluetoothAdapter.getBluetoothLeScanner();
-        if (bluetoothLeScanner == null) {
-            appendLog("BluetoothLeScanner를 가져올 수 없습니다.");
-            return;
-        }
-
-        ScanFilter filter = new ScanFilter.Builder()
-                .setServiceUuid(TARGET_UUID)
-                .build();
-        List<ScanFilter> filters = Collections.singletonList(filter);
-        ScanSettings settings = new ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-                .build();
-
-        bluetoothLeScanner.startScan(filters, settings, scanCallback);
-        scanning = true;
-        scanStartedAt = System.currentTimeMillis();
-        updateButtons();
-        appendLog("BLE 스캔 시작: UUID 0x181A");
-        handler.removeCallbacks(elapsedTicker);
-        handler.post(elapsedTicker);
-    }
-
-    @SuppressLint("MissingPermission")
-    private void stopBleScan() {
-        if (!scanning) {
-            return;
-        }
-        if (hasBlePermissions() && bluetoothLeScanner != null) {
-            bluetoothLeScanner.stopScan(scanCallback);
-        }
-        scanning = false;
-        handler.removeCallbacks(elapsedTicker);
-        long elapsed = System.currentTimeMillis() - scanStartedAt;
-        statusText.setText(String.format(Locale.getDefault(),
-                "스캔 중지 · %s · 수신 %,d개 / 유효 %,d개",
-                formatElapsed(elapsed), collectedRecords.size(), validPacketCount));
-        appendLog("BLE 스캔 중지.");
-        if (elapsed < RECOMMENDED_COLLECTION_MILLIS) {
-            appendLog("안내: PDF 실습 기준 수집 시간은 10분 이상입니다.");
-        }
-        updateButtons();
-    }
-
-    @SuppressLint("MissingPermission")
-    private void processScanResult(ScanResult result) {
-        ScanRecord scanRecord = result.getScanRecord();
-        if (scanRecord == null) {
-            return;
-        }
-
-        byte[] serviceData = scanRecord.getServiceData(TARGET_UUID);
-        SensorPacket sensor = SensorPacket.parse(serviceData);
-        if (sensor == null) {
-            appendLogOnce("0x181A 패킷을 받았지만 ServiceData가 13바이트보다 짧습니다. 상세 분석용으로 보존합니다.");
+    private void startForegroundScan() {
+        Intent intent = new Intent(this, BleScanService.class)
+                .setAction(BleScanService.ACTION_START_SCAN);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent);
         } else {
-            validPacketCount++;
+            startService(intent);
+        }
+        statusText.setText(R.string.scan_service_starting);
+        startButton.setEnabled(false);
+    }
+
+    private void stopBleScan() {
+        if (serviceBound) {
+            scanService.stopBleScan();
+        } else {
+            startService(new Intent(this, BleScanService.class)
+                    .setAction(BleScanService.ACTION_STOP_SCAN));
+        }
+    }
+
+    private void saveCsv() {
+        if (collectedRecords.isEmpty()) {
+            Toast.makeText(this, "저장할 패킷이 없습니다.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (serviceBound) {
+            scanService.saveCsv();
+        } else {
+            startService(new Intent(this, BleScanService.class)
+                    .setAction(BleScanService.ACTION_SAVE_CSV));
+        }
+    }
+
+    private void syncFromService() {
+        collectedRecords.clear();
+        collectedRecords.addAll(scanService.getRecordsSnapshot());
+        rebuildVisibleRows();
+
+        List<String> lines = scanService.getLogLinesSnapshot();
+        if (!lines.isEmpty()) {
+            logText.setText("");
+            for (String line : lines) {
+                appendLogLine(line);
+            }
         }
 
-        BluetoothDevice device = result.getDevice();
-        String name = scanRecord.getDeviceName();
-        if (TextUtils.isEmpty(name) && hasConnectPermission()) {
-            name = device.getName();
+        if (!collectedRecords.isEmpty()) {
+            updateLatestSensor(collectedRecords.get(collectedRecords.size() - 1));
         }
-        if (TextUtils.isEmpty(name)) {
-            name = "unknown";
+        applyServiceState(scanService.getState());
+    }
+
+    private void applyServiceState(BleScanService.ScanState state) {
+        scanning = state.scanning;
+        saving = state.saving;
+        scanStartedAt = state.scanStartedAt;
+        scanStoppedAt = state.scanStoppedAt;
+        validPacketCount = state.validPacketCount;
+        failureMessage = state.failureMessage;
+
+        handler.removeCallbacks(elapsedTicker);
+        updateStatusText();
+        if (scanning) {
+            handler.postDelayed(elapsedTicker, 1000L);
         }
-        String address = hasConnectPermission() ? device.getAddress() : "permission-required";
-        String rawHex = toHex(serviceData);
-        String scanRecordHex = toHex(scanRecord.getBytes());
-        long receivedAtMillis = System.currentTimeMillis();
-        String packetDetails = PacketInspector.inspect(result, scanRecord, name, address,
-                TARGET_UUID, TARGET_NAME, receivedAtMillis);
+        updateButtons();
+    }
 
-        BleRecord record = new BleRecord(receivedAtMillis, name, address,
-                result.getRssi(), TARGET_UUID.toString(), sensor, rawHex,
-                scanRecordHex, packetDetails);
-        collectedRecords.add(record);
+    private void updateStatusText() {
+        if (failureMessage != null) {
+            statusText.setText(getString(R.string.scan_failed_status, failureMessage));
+            return;
+        }
+        if (saving) {
+            statusText.setText(String.format(Locale.getDefault(),
+                    "CSV 저장 중 · 수신 %,d개 / 유효 %,d개",
+                    collectedRecords.size(), validPacketCount));
+            return;
+        }
+        if (scanning) {
+            statusText.setText(String.format(Locale.getDefault(),
+                    "백그라운드 스캔 중 · %s · 수신 %,d개 / 유효 %,d개",
+                    formatElapsed(System.currentTimeMillis() - scanStartedAt),
+                    collectedRecords.size(), validPacketCount));
+            return;
+        }
+        if (scanStartedAt > 0L) {
+            long end = Math.max(scanStoppedAt, scanStartedAt);
+            statusText.setText(String.format(Locale.getDefault(),
+                    "스캔 중지 · %s · 수신 %,d개 / 유효 %,d개",
+                    formatElapsed(end - scanStartedAt),
+                    collectedRecords.size(), validPacketCount));
+        } else {
+            statusText.setText(R.string.status_ready);
+        }
+    }
 
-        String sensorSummary = sensor == null
-                ? "센서 파싱 불가 · ServiceData "
-                    + (serviceData == null ? 0 : serviceData.length) + " bytes"
-                : sensor.toString();
-        String row = String.format(Locale.getDefault(),
-                "%s\nMAC: %s  RSSI: %d dBm\n%s",
-                name, address, result.getRssi(), sensorSummary);
-        visibleRows.add(0, row);
+    private void addVisibleRecord(BleRecord record) {
+        visibleRows.add(0, formatRecordRow(record));
         if (visibleRows.size() > MAX_VISIBLE_ROWS) {
             visibleRows.remove(visibleRows.size() - 1);
         }
         scanListAdapter.notifyDataSetChanged();
+    }
+
+    private void rebuildVisibleRows() {
+        visibleRows.clear();
+        int first = Math.max(0, collectedRecords.size() - MAX_VISIBLE_ROWS);
+        for (int i = collectedRecords.size() - 1; i >= first; i--) {
+            visibleRows.add(formatRecordRow(collectedRecords.get(i)));
+        }
+        scanListAdapter.notifyDataSetChanged();
+    }
+
+    private String formatRecordRow(BleRecord record) {
+        SensorPacket sensor = record.sensor;
+        String sensorSummary = sensor == null
+                ? "센서 파싱 불가 · ServiceData "
+                + (record.rawHex.length() / 2) + " bytes"
+                : sensor.toString();
+        return String.format(Locale.getDefault(),
+                "%s\nMAC: %s  RSSI: %d dBm\n%s",
+                record.name, record.address, record.rssi, sensorSummary);
+    }
+
+    private void updateLatestSensor(BleRecord record) {
+        SensorPacket sensor = record.sensor;
         if (sensor == null) {
             latestSensorText.setText(getString(R.string.latest_packet_invalid,
-                    serviceData == null ? 0 : serviceData.length, rawHex));
+                    record.rawHex.length() / 2, record.rawHex));
         } else {
             latestSensorText.setText(getString(R.string.latest_sensor_format,
-                    sensor.toString(), sensor.timestamp, rawHex));
+                    sensor.toString(), sensor.timestamp, record.rawHex));
         }
-        saveButton.setEnabled(true);
     }
 
     private void showPacketDetails(BleRecord record) {
@@ -344,10 +426,10 @@ public class MainActivity extends Activity {
                 .setTitle(R.string.packet_detail_title)
                 .setView(scroll)
                 .setNegativeButton(R.string.copy, (dialog, which) -> {
-                    ClipboardManager clipboard =
-                            (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                    android.content.ClipboardManager clipboard =
+                            (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
                     if (clipboard != null) {
-                        clipboard.setPrimaryClip(ClipData.newPlainText(
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(
                                 "BLE packet details", record.packetDetails));
                         Toast.makeText(this, "패킷 상세를 복사했습니다.",
                                 Toast.LENGTH_SHORT).show();
@@ -357,98 +439,32 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private boolean hasConnectPermission() {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S
-                || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private void saveCsv() {
-        if (collectedRecords.isEmpty()) {
-            Toast.makeText(this, "저장할 유효 패킷이 없습니다.", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        List<BleRecord> snapshot = new ArrayList<>(collectedRecords);
-        saveButton.setEnabled(false);
-        appendLog("CSV 저장 시작: " + snapshot.size() + "행");
-
-        fileExecutor.execute(() -> {
-            try {
-                File file = CsvExporter.save(this, snapshot);
-                runOnUiThread(() -> {
-                    appendLog("CSV 저장 완료: " + file.getAbsolutePath());
-                    Toast.makeText(this, "CSV 저장 완료\n" + file.getName(),
-                            Toast.LENGTH_LONG).show();
-                    saveButton.setEnabled(true);
-                });
-            } catch (IOException e) {
-                runOnUiThread(() -> {
-                    appendLog("CSV 저장 실패: " + e.getMessage());
-                    Toast.makeText(this, "CSV 저장 실패", Toast.LENGTH_LONG).show();
-                    saveButton.setEnabled(true);
-                });
-            }
-        });
-    }
-
     private void updateButtons() {
-        startButton.setEnabled(!scanning && bluetoothAdapter != null);
-        stopButton.setEnabled(scanning);
-        saveButton.setEnabled(!collectedRecords.isEmpty());
+        startButton.setEnabled(!scanning && !saving && bluetoothAdapter != null);
+        stopButton.setEnabled(scanning && !saving);
+        saveButton.setEnabled(!collectedRecords.isEmpty() && !saving);
     }
 
-    private void appendLog(String message) {
-        String time = new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date());
-        logText.append("[" + time + "] " + message + "\n");
+    private void appendLocalLog(String message) {
+        String time = new java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                .format(new java.util.Date());
+        appendLogLine("[" + time + "] " + message);
+    }
+
+    private void appendLogLine(String line) {
+        logText.append(line + "\n");
         logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
     }
 
-    private void appendLogOnce(String message) {
-        if (!logText.getText().toString().contains(message)) {
-            appendLog(message);
-        }
-    }
-
-    private static String toHex(byte[] bytes) {
-        if (bytes == null || bytes.length == 0) {
-            return "";
-        }
-        StringBuilder builder = new StringBuilder(bytes.length * 2);
-        for (byte value : bytes) {
-            builder.append(String.format(Locale.US, "%02X", value & 0xFF));
-        }
-        return builder.toString();
-    }
-
     private static String formatElapsed(long millis) {
-        long totalSeconds = millis / 1000L;
+        long totalSeconds = Math.max(0L, millis) / 1000L;
         return String.format(Locale.getDefault(), "%02d:%02d",
                 totalSeconds / 60L, totalSeconds % 60L);
     }
 
-    private static String scanErrorMessage(int errorCode) {
-        switch (errorCode) {
-            case ScanCallback.SCAN_FAILED_ALREADY_STARTED:
-                return "이미 스캔 중입니다 (1)";
-            case ScanCallback.SCAN_FAILED_APPLICATION_REGISTRATION_FAILED:
-                return "앱 등록 실패 (2)";
-            case ScanCallback.SCAN_FAILED_INTERNAL_ERROR:
-                return "내부 오류 (3)";
-            case ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED:
-                return "기능 미지원 (4)";
-            default:
-                return "오류 코드 " + errorCode;
-        }
-    }
-
-    @SuppressLint("MissingPermission")
     @Override
     protected void onDestroy() {
-        if (scanning && bluetoothLeScanner != null && hasBlePermissions()) {
-            bluetoothLeScanner.stopScan(scanCallback);
-        }
         handler.removeCallbacksAndMessages(null);
-        fileExecutor.shutdown();
         super.onDestroy();
     }
 }
