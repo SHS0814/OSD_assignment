@@ -15,7 +15,7 @@ public final class CsvExporter {
     private static final String HEADER =
             "received_at,device_name,device_address,rssi,uuid,temperature_c," +
             "humidity_percent,aqi,tvoc_ppb,eco2_ppm,sensor_unix_timestamp," +
-            "service_data_hex,scan_record_hex,packet_details\n";
+            "service_data_hex,scan_record_hex\n";
 
     private CsvExporter() {
     }
@@ -48,8 +48,7 @@ public final class CsvExporter {
                         .append(s == null ? "" : String.valueOf(s.eco2)).append(',')
                         .append(s == null ? "" : String.valueOf(s.timestamp)).append(',')
                         .append(csv(record.rawHex)).append(',')
-                        .append(csv(record.scanRecordHex)).append(',')
-                        .append(csv(record.packetDetails)).append('\n');
+                        .append(csv(record.scanRecordHex)).append('\n');
             }
             fw.flush();
         }

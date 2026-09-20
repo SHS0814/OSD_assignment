@@ -25,6 +25,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelUuid;
+import android.os.SystemClock;
 import android.text.TextUtils;
 
 import java.io.File;
@@ -37,6 +38,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /** BLE 광고 스캔과 수집 레코드를 Activity와 분리해 백그라운드에서 유지한다. */
 public final class BleScanService extends Service {
@@ -52,9 +54,10 @@ public final class BleScanService extends Service {
     private static final String NOTIFICATION_CHANNEL_ID = "ble_collection";
     private static final int NOTIFICATION_ID = 1810;
     private static final int MAX_LOG_LINES = 200;
+    private static final long NOTIFICATION_REFRESH_MILLIS = 5_000L;
+    private static final char[] HEX_DIGITS = "0123456789ABCDEF".toCharArray();
     private static final ParcelUuid TARGET_UUID =
             ParcelUuid.fromString("0000181a-0000-1000-8000-00805f9b34fb");
-    private static final String TARGET_NAME = "opensrc_week_3";
     private static final long RECOMMENDED_COLLECTION_MILLIS = 10L * 60L * 1000L;
 
     public interface Listener {
@@ -103,6 +106,7 @@ public final class BleScanService extends Service {
 
     private final IBinder binder = new LocalBinder();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final ExecutorService recordExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
     private final List<BleRecord> collectedRecords = new ArrayList<>();
     private final List<String> logLines = new ArrayList<>();
@@ -117,17 +121,18 @@ public final class BleScanService extends Service {
     private long scanStoppedAt;
     private int validPacketCount;
     private String failureMessage;
+    private long lastNotificationUpdateElapsed;
 
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override
         public void onScanResult(int callbackType, ScanResult result) {
-            processScanResult(result);
+            enqueueScanResult(result);
         }
 
         @Override
         public void onBatchScanResults(List<ScanResult> results) {
             for (ScanResult result : results) {
-                processScanResult(result);
+                enqueueScanResult(result);
             }
         }
 
@@ -219,16 +224,34 @@ public final class BleScanService extends Service {
         if (saving) {
             return;
         }
+        saving = true;
+        updateForegroundNotification();
+        notifyStateChanged();
+        // 수신 처리 큐의 앞선 결과가 모두 기록된 뒤 CSV 스냅샷을 만든다.
+        try {
+            recordExecutor.execute(() -> mainHandler.post(this::saveCsvAfterPendingRecords));
+        } catch (RejectedExecutionException e) {
+            saving = false;
+            notifySaveFailed("CSV 저장 실패: 수신 처리기가 종료되었습니다.");
+            updateForegroundNotification();
+            notifyStateChanged();
+        }
+    }
+
+    private void saveCsvAfterPendingRecords() {
         if (collectedRecords.isEmpty()) {
+            saving = false;
             notifySaveFailed("저장할 패킷이 없습니다.");
             if (!scanning) {
                 finishForegroundService();
+            } else {
+                updateForegroundNotification();
             }
+            notifyStateChanged();
             return;
         }
 
         List<BleRecord> snapshot = new ArrayList<>(collectedRecords);
-        saving = true;
         addLog("CSV 저장 시작: " + snapshot.size() + "행");
         updateForegroundNotification();
         notifyStateChanged();
@@ -305,8 +328,17 @@ public final class BleScanService extends Service {
         }
     }
 
+    private void enqueueScanResult(ScanResult result) {
+        long receivedAtMillis = System.currentTimeMillis();
+        try {
+            recordExecutor.execute(() -> processScanResult(result, receivedAtMillis));
+        } catch (RejectedExecutionException ignored) {
+            // 서비스 종료 후 늦게 도착한 콜백은 더 이상 처리할 수 없다.
+        }
+    }
+
     @SuppressLint("MissingPermission")
-    private void processScanResult(ScanResult result) {
+    private void processScanResult(ScanResult result, long receivedAtMillis) {
         ScanRecord scanRecord = result.getScanRecord();
         if (scanRecord == null) {
             return;
@@ -314,12 +346,6 @@ public final class BleScanService extends Service {
 
         byte[] serviceData = scanRecord.getServiceData(TARGET_UUID);
         SensorPacket sensor = SensorPacket.parse(serviceData);
-        if (sensor == null) {
-            addLogOnce("0x181A 패킷을 받았지만 ServiceData가 13바이트보다 짧습니다. 상세 분석용으로 보존합니다.");
-        } else {
-            validPacketCount++;
-        }
-
         BluetoothDevice device = result.getDevice();
         String name = scanRecord.getDeviceName();
         if (TextUtils.isEmpty(name) && hasConnectPermission()) {
@@ -331,19 +357,26 @@ public final class BleScanService extends Service {
         String address = hasConnectPermission() ? device.getAddress() : "permission-required";
         String serviceDataHex = toHex(serviceData);
         String scanRecordHex = toHex(scanRecord.getBytes());
-        long receivedAtMillis = System.currentTimeMillis();
-        String packetDetails = PacketInspector.inspect(result, scanRecord, name, address,
-                TARGET_UUID, TARGET_NAME, receivedAtMillis);
-
         BleRecord record = new BleRecord(receivedAtMillis, name, address,
                 result.getRssi(), TARGET_UUID.toString(), sensor, serviceDataHex,
-                scanRecordHex, packetDetails);
-        collectedRecords.add(record);
+                scanRecordHex);
+        mainHandler.post(() -> recordScanResult(record));
+    }
 
+    private void recordScanResult(BleRecord record) {
+        if (record.sensor == null) {
+            addLogOnce("0x181A 패킷을 받았지만 ServiceData가 13바이트보다 짧습니다. 상세 분석용으로 보존합니다.");
+        } else {
+            validPacketCount++;
+        }
+        collectedRecords.add(record);
         if (listener != null) {
             listener.onRecordReceived(record);
         }
-        updateForegroundNotification();
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastNotificationUpdateElapsed >= NOTIFICATION_REFRESH_MILLIS) {
+            updateForegroundNotification();
+        }
         notifyStateChanged();
     }
 
@@ -437,6 +470,7 @@ public final class BleScanService extends Service {
         if (!foregroundStarted) {
             return;
         }
+        lastNotificationUpdateElapsed = SystemClock.elapsedRealtime();
         String text;
         if (saving) {
             text = "CSV 저장 중 · " + collectedRecords.size() + "건";
@@ -501,11 +535,13 @@ public final class BleScanService extends Service {
         if (bytes == null || bytes.length == 0) {
             return "";
         }
-        StringBuilder builder = new StringBuilder(bytes.length * 2);
-        for (byte value : bytes) {
-            builder.append(String.format(Locale.US, "%02X", value & 0xFF));
+        char[] chars = new char[bytes.length * 2];
+        for (int i = 0; i < bytes.length; i++) {
+            int value = bytes[i] & 0xFF;
+            chars[i * 2] = HEX_DIGITS[value >>> 4];
+            chars[i * 2 + 1] = HEX_DIGITS[value & 0x0F];
         }
-        return builder.toString();
+        return new String(chars);
     }
 
     private static String formatElapsed(long millis) {
@@ -536,6 +572,7 @@ public final class BleScanService extends Service {
             bluetoothLeScanner.stopScan(scanCallback);
         }
         scanning = false;
+        recordExecutor.shutdown();
         fileExecutor.shutdown();
         super.onDestroy();
     }

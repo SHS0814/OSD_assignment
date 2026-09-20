@@ -3,7 +3,6 @@ package com.example.rpiblecollector;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothManager;
 import android.content.ComponentName;
@@ -11,7 +10,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
-import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -138,12 +136,6 @@ public class MainActivity extends Activity {
         scanListAdapter = new ArrayAdapter<>(this,
                 android.R.layout.simple_list_item_1, visibleRows);
         scanList.setAdapter(scanListAdapter);
-        scanList.setOnItemClickListener((parent, view, position, id) -> {
-            int recordIndex = collectedRecords.size() - 1 - position;
-            if (recordIndex >= 0 && recordIndex < collectedRecords.size()) {
-                showPacketDetails(collectedRecords.get(recordIndex));
-            }
-        });
 
         BluetoothManager manager = getSystemService(BluetoothManager.class);
         bluetoothAdapter = manager == null ? null : manager.getAdapter();
@@ -408,35 +400,6 @@ public class MainActivity extends Activity {
             latestSensorText.setText(getString(R.string.latest_sensor_format,
                     sensor.toString(), sensor.timestamp, record.rawHex));
         }
-    }
-
-    private void showPacketDetails(BleRecord record) {
-        TextView details = new TextView(this);
-        int padding = (int) (16 * getResources().getDisplayMetrics().density);
-        details.setPadding(padding, padding, padding, padding);
-        details.setTypeface(Typeface.MONOSPACE);
-        details.setTextSize(12f);
-        details.setTextIsSelectable(true);
-        details.setText(record.packetDetails);
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(details);
-
-        new AlertDialog.Builder(this)
-                .setTitle(R.string.packet_detail_title)
-                .setView(scroll)
-                .setNegativeButton(R.string.copy, (dialog, which) -> {
-                    android.content.ClipboardManager clipboard =
-                            (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                    if (clipboard != null) {
-                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(
-                                "BLE packet details", record.packetDetails));
-                        Toast.makeText(this, "패킷 상세를 복사했습니다.",
-                                Toast.LENGTH_SHORT).show();
-                    }
-                })
-                .setPositiveButton(R.string.close, null)
-                .show();
     }
 
     private void updateButtons() {
