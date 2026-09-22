@@ -40,7 +40,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 
-/** BLE 광고 스캔과 수집 레코드를 Activity와 분리해 백그라운드에서 유지한다. */
+/**
+ * BLE 광고 스캔과 수집 레코드를 Activity와 분리해 백그라운드에서 유지한다.
+ * 4주차 PDF 7쪽 시스템 아키텍처의 "BLE Scanning → HTTP" 구간을 이 서비스가 모두 담당한다.
+ */
 public final class BleScanService extends Service {
     public static final String ACTION_START_SCAN =
             "com.example.rpiblecollector.action.START_SCAN";
@@ -50,12 +53,13 @@ public final class BleScanService extends Service {
             "com.example.rpiblecollector.action.SAVE_CSV";
     public static final String ACTION_STOP_AND_SAVE =
             "com.example.rpiblecollector.action.STOP_AND_SAVE";
+    public static final String ACTION_UPLOAD_LATEST =
+            "com.example.rpiblecollector.action.UPLOAD_LATEST";
 
     private static final String NOTIFICATION_CHANNEL_ID = "ble_collection";
     private static final int NOTIFICATION_ID = 1810;
     private static final int MAX_LOG_LINES = 200;
     private static final long NOTIFICATION_REFRESH_MILLIS = 5_000L;
-    private static final char[] HEX_DIGITS = "0123456789ABCDEF".toCharArray();
     private static final ParcelUuid TARGET_UUID =
             ParcelUuid.fromString("0000181a-0000-1000-8000-00805f9b34fb");
     private static final long RECOMMENDED_COLLECTION_MILLIS = 10L * 60L * 1000L;
@@ -66,6 +70,7 @@ public final class BleScanService extends Service {
         void onLogLine(String line);
         void onCsvSaved(File file);
         void onCsvSaveFailed(String message);
+        void onUploadResult(boolean success, String message);
     }
 
     public static final class ScanState {
@@ -76,10 +81,14 @@ public final class BleScanService extends Service {
         public final int recordCount;
         public final int validPacketCount;
         public final String failureMessage;
+        public final int uploadSuccessCount;
+        public final int uploadFailureCount;
+        public final String lastServerMessage;
 
         private ScanState(boolean scanning, boolean saving, long scanStartedAt,
                           long scanStoppedAt, int recordCount, int validPacketCount,
-                          String failureMessage) {
+                          String failureMessage, int uploadSuccessCount,
+                          int uploadFailureCount, String lastServerMessage) {
             this.scanning = scanning;
             this.saving = saving;
             this.scanStartedAt = scanStartedAt;
@@ -87,6 +96,9 @@ public final class BleScanService extends Service {
             this.recordCount = recordCount;
             this.validPacketCount = validPacketCount;
             this.failureMessage = failureMessage;
+            this.uploadSuccessCount = uploadSuccessCount;
+            this.uploadFailureCount = uploadFailureCount;
+            this.lastServerMessage = lastServerMessage;
         }
 
         public long elapsedMillis(long now) {
@@ -123,6 +135,47 @@ public final class BleScanService extends Service {
     private String failureMessage;
     private long lastNotificationUpdateElapsed;
 
+    // --- HTTP 전송 (4주차 PDF) ---
+    private SensorUploader uploader;
+    private LocationTracker locationTracker;
+    private UploadConfig uploadConfig;
+    private String senderId;
+    private int uploadSuccessCount;
+    private int uploadFailureCount;
+    private long lastUploadElapsed;
+    private long lastUploadedSensorTimestamp = -1L;
+    private String lastServerMessage;
+    private boolean loggedPacketLayout;
+
+    private final SensorUploader.UploadCallback uploadCallback =
+            new SensorUploader.UploadCallback() {
+                @Override
+                public void onUploadSuccess(PostData sent, PostResponse body) {
+                    uploadSuccessCount++;
+                    lastServerMessage = body.summary();
+                    addLog("HTTP 200 · " + lastServerMessage);
+                    markUploadResult(sent, "success");
+                    if (listener != null) {
+                        listener.onUploadResult(true, lastServerMessage);
+                    }
+                    updateForegroundNotification();
+                    notifyStateChanged();
+                }
+
+                @Override
+                public void onUploadFailure(PostData sent, String message) {
+                    uploadFailureCount++;
+                    lastServerMessage = message;
+                    addLog("전송 실패 · " + message);
+                    markUploadResult(sent, "fail: " + message);
+                    if (listener != null) {
+                        listener.onUploadResult(false, message);
+                    }
+                    updateForegroundNotification();
+                    notifyStateChanged();
+                }
+            };
+
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override
         public void onScanResult(int callbackType, ScanResult result) {
@@ -152,6 +205,10 @@ public final class BleScanService extends Service {
         super.onCreate();
         BluetoothManager manager = getSystemService(BluetoothManager.class);
         bluetoothAdapter = manager == null ? null : manager.getAdapter();
+        uploader = new SensorUploader();
+        locationTracker = new LocationTracker(this);
+        uploadConfig = UploadConfig.load(this);
+        senderId = UploadConfig.senderId(this);
         createNotificationChannel();
     }
 
@@ -172,6 +229,8 @@ public final class BleScanService extends Service {
         } else if (ACTION_STOP_AND_SAVE.equals(action)) {
             stopBleScan();
             saveCsv();
+        } else if (ACTION_UPLOAD_LATEST.equals(action)) {
+            uploadLatestRecord();
         }
         return START_NOT_STICKY;
     }
@@ -190,7 +249,8 @@ public final class BleScanService extends Service {
 
     public ScanState getState() {
         return new ScanState(scanning, saving, scanStartedAt, scanStoppedAt,
-                collectedRecords.size(), validPacketCount, failureMessage);
+                collectedRecords.size(), validPacketCount, failureMessage,
+                uploadSuccessCount, uploadFailureCount, lastServerMessage);
     }
 
     public List<BleRecord> getRecordsSnapshot() {
@@ -199,6 +259,41 @@ public final class BleScanService extends Service {
 
     public List<String> getLogLinesSnapshot() {
         return new ArrayList<>(logLines);
+    }
+
+    public UploadConfig getUploadConfig() {
+        return uploadConfig;
+    }
+
+    /** Activity 에서 팀 번호·센서 이름·자동 전송 설정을 바꿀 때 호출한다. */
+    public void setUploadConfig(UploadConfig config) {
+        boolean autoChanged = uploadConfig.autoUpload != config.autoUpload;
+        uploadConfig = config;
+        config.save(this);
+        if (autoChanged) {
+            addLog(config.autoUpload
+                    ? "자동 전송 켜짐 · " + config.intervalSeconds + "초마다 POST "
+                            + SensorUploader.BASE_URL + SensorUploader.SEND_PATH
+                    : "자동 전송 꺼짐.");
+            if (config.autoUpload) {
+                locationTracker.start();
+            }
+        }
+        notifyStateChanged();
+    }
+
+    /** 가장 최근에 파싱된 센서 패킷 하나를 즉시 서버로 보낸다(수동 전송). */
+    public void uploadLatestRecord() {
+        BleRecord latest = latestParsedRecord();
+        if (latest == null) {
+            String message = "전송할 센서 패킷이 없습니다.";
+            addLog(message);
+            if (listener != null) {
+                listener.onUploadResult(false, message);
+            }
+            return;
+        }
+        upload(latest);
     }
 
     @SuppressLint("MissingPermission")
@@ -212,6 +307,7 @@ public final class BleScanService extends Service {
         scanning = false;
         scanStoppedAt = System.currentTimeMillis();
         long elapsed = scanStoppedAt - scanStartedAt;
+        locationTracker.stop();
         addLog("BLE 스캔 중지.");
         if (elapsed < RECOMMENDED_COLLECTION_MILLIS) {
             addLog("안내: PDF 실습 기준 수집 시간은 10분 이상입니다.");
@@ -320,7 +416,15 @@ public final class BleScanService extends Service {
             scanning = true;
             scanStartedAt = System.currentTimeMillis();
             scanStoppedAt = 0L;
+            locationTracker.start();
             addLog("BLE 스캔 시작: UUID 0x181A · Foreground Service");
+            if (uploadConfig.autoUpload) {
+                addLog("자동 전송 켜짐 · " + uploadConfig.intervalSeconds + "초마다 POST "
+                        + SensorUploader.BASE_URL + SensorUploader.SEND_PATH);
+            }
+            if (!locationTracker.hasPermission()) {
+                addLog("위치 권한이 없어 lat/lon 은 0.0 으로 전송됩니다.");
+            }
             updateForegroundNotification();
             notifyStateChanged();
         } catch (SecurityException e) {
@@ -330,24 +434,26 @@ public final class BleScanService extends Service {
 
     private void enqueueScanResult(ScanResult result) {
         long receivedAtMillis = System.currentTimeMillis();
+        double latitude = locationTracker.latitude();
+        double longitude = locationTracker.longitude();
         try {
-            recordExecutor.execute(() -> processScanResult(result, receivedAtMillis));
+            recordExecutor.execute(() ->
+                    processScanResult(result, receivedAtMillis, latitude, longitude));
         } catch (RejectedExecutionException ignored) {
             // 서비스 종료 후 늦게 도착한 콜백은 더 이상 처리할 수 없다.
         }
     }
 
     @SuppressLint("MissingPermission")
-    private void processScanResult(ScanResult result, long receivedAtMillis) {
+    private void processScanResult(ScanResult result, long receivedAtMillis,
+                                   double latitude, double longitude) {
+        // ScanRecord 를 못 얻어도 레코드를 버리지 않는다. RSSI/MAC/무선 계층 정보만이라도
+        // 남겨 두어야 "수신은 했는데 원본이 없는" 상황이 CSV 에서 드러난다.
         ScanRecord scanRecord = result.getScanRecord();
-        if (scanRecord == null) {
-            return;
-        }
-
-        byte[] serviceData = scanRecord.getServiceData(TARGET_UUID);
+        byte[] serviceData = scanRecord == null ? null : scanRecord.getServiceData(TARGET_UUID);
         SensorPacket sensor = SensorPacket.parse(serviceData);
         BluetoothDevice device = result.getDevice();
-        String name = scanRecord.getDeviceName();
+        String name = scanRecord == null ? null : scanRecord.getDeviceName();
         if (TextUtils.isEmpty(name) && hasConnectPermission()) {
             name = device.getName();
         }
@@ -355,11 +461,11 @@ public final class BleScanService extends Service {
             name = "unknown";
         }
         String address = hasConnectPermission() ? device.getAddress() : "permission-required";
-        String serviceDataHex = toHex(serviceData);
-        String scanRecordHex = toHex(scanRecord.getBytes());
+        String serviceDataHex = Hex.encode(serviceData);
+        String scanRecordHex = scanRecord == null ? "" : Hex.encode(scanRecord.getBytes());
         BleRecord record = new BleRecord(receivedAtMillis, name, address,
                 result.getRssi(), TARGET_UUID.toString(), sensor, serviceDataHex,
-                scanRecordHex);
+                scanRecordHex, latitude, longitude, AdvertisingMeta.from(result));
         mainHandler.post(() -> recordScanResult(record));
     }
 
@@ -368,16 +474,111 @@ public final class BleScanService extends Service {
             addLogOnce("0x181A 패킷을 받았지만 ServiceData가 13바이트보다 짧습니다. 상세 분석용으로 보존합니다.");
         } else {
             validPacketCount++;
+            logPacketLayoutOnce(record);
+        }
+        if (record.meta.isTruncated()) {
+            addLogOnce("경고: 광고 데이터가 잘려서(truncated) 수신되었습니다. "
+                    + "HMAC 태그 일부가 유실되었을 수 있습니다.");
+        }
+        if (record.scanRecordHex.isEmpty()) {
+            addLogOnce("경고: 광고 원본 바이트를 얻지 못한 패킷이 있습니다. "
+                    + "해당 행은 MAC/RSSI 만 기록됩니다.");
+        } else if (record.rawHex.isEmpty()) {
+            addLogOnce("경고: 0x181A ServiceData 가 없는 패킷이 있습니다. "
+                    + "scan_record_hex 에서 직접 확인하세요.");
         }
         collectedRecords.add(record);
         if (listener != null) {
             listener.onRecordReceived(record);
         }
+        maybeAutoUpload(record);
         long now = SystemClock.elapsedRealtime();
         if (now - lastNotificationUpdateElapsed >= NOTIFICATION_REFRESH_MILLIS) {
             updateForegroundNotification();
         }
         notifyStateChanged();
+    }
+
+    /** 첫 유효 패킷에서 실제 ServiceData 길이와 HMAC 태그 길이를 한 번만 알린다. */
+    private void logPacketLayoutOnce(BleRecord record) {
+        if (loggedPacketLayout) {
+            return;
+        }
+        loggedPacketLayout = true;
+        int serviceDataBytes = record.rawHex.length() / 2;
+        if (record.sensor.hasHmacTag()) {
+            addLog("패킷 구조: ServiceData " + serviceDataBytes + "바이트 = 센서 "
+                    + SensorPacket.SENSOR_PAYLOAD_LENGTH + "바이트 + HMAC 태그 "
+                    + record.sensor.hmacTagLength() + "바이트");
+        } else {
+            addLog("패킷 구조: ServiceData " + serviceDataBytes
+                    + "바이트 · HMAC 태그 없음");
+        }
+        if (!record.meta.dataStatusName().isEmpty()) {
+            addLog("광고 유형: " + (record.meta.legacy ? "legacy" : "extended")
+                    + " · 데이터 " + record.meta.dataStatusName()
+                    + " · PHY " + record.meta.phyName(record.meta.primaryPhy)
+                    + "/" + record.meta.phyName(record.meta.secondaryPhy));
+        }
+    }
+
+    /**
+     * 자동 전송. 광고 패킷은 초당 여러 번 들어오므로 설정한 주기를 지키고,
+     * 같은 센서 timestamp 는 한 번만 보낸다.
+     */
+    private void maybeAutoUpload(BleRecord record) {
+        if (!uploadConfig.autoUpload || record.sensor == null) {
+            return;
+        }
+        if (record.sensor.timestamp == lastUploadedSensorTimestamp) {
+            record.setUploadResult("skipped_duplicate");
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (lastUploadElapsed != 0L && now - lastUploadElapsed < uploadConfig.intervalMillis()) {
+            record.setUploadResult("skipped_interval");
+            return;
+        }
+        upload(record);
+    }
+
+    /** PDF 21쪽 "데이터 전송 코드" 호출 지점. */
+    private void upload(BleRecord record) {
+        PostData body = PostData.from(record, uploadConfig.team, uploadConfig.sensor, senderId);
+        if (body == null) {
+            addLog("전송 실패 · 센서 패킷을 파싱하지 못한 레코드입니다.");
+            if (listener != null) {
+                listener.onUploadResult(false, "센서 패킷 파싱 불가");
+            }
+            return;
+        }
+        lastUploadElapsed = SystemClock.elapsedRealtime();
+        lastUploadedSensorTimestamp = record.sensor.timestamp;
+        record.setUploadResult("sending");
+        addLog("POST " + SensorUploader.SEND_PATH + " · " + body.summary());
+        uploader.send(body, uploadCallback);
+    }
+
+    /** 전송 결과를 해당 레코드에 되돌려 기록해 CSV 에 남긴다. */
+    private void markUploadResult(PostData sent, String result) {
+        for (int i = collectedRecords.size() - 1; i >= 0; i--) {
+            BleRecord record = collectedRecords.get(i);
+            if (record.sensor != null
+                    && record.sensor.timestamp == sent.getTimestamp()
+                    && "sending".equals(record.getUploadResult())) {
+                record.setUploadResult(result);
+                return;
+            }
+        }
+    }
+
+    private BleRecord latestParsedRecord() {
+        for (int i = collectedRecords.size() - 1; i >= 0; i--) {
+            if (collectedRecords.get(i).sensor != null) {
+                return collectedRecords.get(i);
+            }
+        }
+        return null;
     }
 
     private boolean hasBlePermissions() {
@@ -477,6 +678,10 @@ public final class BleScanService extends Service {
         } else if (scanning) {
             text = "수집 " + collectedRecords.size() + "건 · "
                     + formatElapsed(System.currentTimeMillis() - scanStartedAt);
+            if (uploadConfig.autoUpload) {
+                text += " · 전송 " + uploadSuccessCount + "/"
+                        + (uploadSuccessCount + uploadFailureCount);
+            }
         } else if (failureMessage != null) {
             text = failureMessage;
         } else {
@@ -531,19 +736,6 @@ public final class BleScanService extends Service {
         stopSelf();
     }
 
-    private static String toHex(byte[] bytes) {
-        if (bytes == null || bytes.length == 0) {
-            return "";
-        }
-        char[] chars = new char[bytes.length * 2];
-        for (int i = 0; i < bytes.length; i++) {
-            int value = bytes[i] & 0xFF;
-            chars[i * 2] = HEX_DIGITS[value >>> 4];
-            chars[i * 2 + 1] = HEX_DIGITS[value & 0x0F];
-        }
-        return new String(chars);
-    }
-
     private static String formatElapsed(long millis) {
         long totalSeconds = Math.max(0L, millis) / 1000L;
         return String.format(Locale.getDefault(), "%02d:%02d",
@@ -572,6 +764,7 @@ public final class BleScanService extends Service {
             bluetoothLeScanner.stopScan(scanCallback);
         }
         scanning = false;
+        locationTracker.stop();
         recordExecutor.shutdown();
         fileExecutor.shutdown();
         super.onDestroy();

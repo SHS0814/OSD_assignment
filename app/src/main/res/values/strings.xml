@@ -12,10 +12,27 @@
     <string name="event_log">동작 로그</string>
     <string name="scan_failed_status">스캔 실패 · %1$s</string>
     <string name="bluetooth_unsupported">이 기기는 Bluetooth를 지원하지 않습니다.</string>
-    <string name="latest_sensor_format">최근 센서 값\n%1$s\n센서 시각: %2$d · Raw: %3$s</string>
+    <string name="latest_sensor_format">최근 센서 값\n%1$s\n센서 시각: %2$d\nHMAC 태그: %3$s\nServiceData Raw: %4$s</string>
+    <string name="hmac_tag_format">%1$s (%2$d바이트)</string>
+    <string name="hmac_tag_missing">없음</string>
     <string name="latest_packet_invalid">최근 패킷\n센서 패킷 파싱 불가(%1$d바이트)\nServiceData Raw: %2$s</string>
     <string name="notification_channel_name">BLE 패킷 수집</string>
     <string name="notification_channel_description">백그라운드 BLE 패킷 수집 상태를 표시합니다.</string>
     <string name="notification_title">BLE 패킷 수집 중</string>
     <string name="notification_stop_and_save">중지 후 저장</string>
+
+    <!-- 4주차 HTTP 통신 -->
+    <string name="server_section">서버 전송 (HTTP POST · REST API)</string>
+    <string name="server_endpoint">POST http://203.255.81.72:10021/sensor/opensrc/test/</string>
+    <string name="team_hint">팀 번호</string>
+    <string name="sensor_hint">센서 이름</string>
+    <string name="auto_upload">자동 전송</string>
+    <string name="interval_hint">주기(초)</string>
+    <string name="upload_now">지금 전송</string>
+    <string name="open_check_page">수집 현황</string>
+    <string name="upload_status_idle">전송 성공 0 · 실패 0</string>
+    <string name="upload_status_format">전송 성공 %1$,d · 실패 %2$,d\n최근 응답: %3$s</string>
+    <string name="upload_status_no_response">아직 응답 없음</string>
+    <string name="sender_format">sender(ANDROID_ID): %1$s</string>
+    <string name="location_permission_rationale">lat/lon 을 함께 보내려면 위치 권한이 필요합니다. 거부하면 0.0 으로 전송됩니다.</string>
 </resources>

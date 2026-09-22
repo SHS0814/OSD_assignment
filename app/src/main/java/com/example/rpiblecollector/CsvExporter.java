@@ -15,7 +15,8 @@ public final class CsvExporter {
     private static final String HEADER =
             "received_at,device_name,device_address,rssi,uuid,temperature_c," +
             "humidity_percent,aqi,tvoc_ppb,eco2_ppm,sensor_unix_timestamp," +
-            "service_data_hex,scan_record_hex\n";
+            "hmac_tag_hex,lat,lon,upload_result,tx_power,primary_phy,secondary_phy," +
+            "advertising_sid,is_legacy,data_status,service_data_hex,scan_record_hex\n";
 
     private CsvExporter() {
     }
@@ -47,6 +48,16 @@ public final class CsvExporter {
                         .append(s == null ? "" : String.valueOf(s.tvoc)).append(',')
                         .append(s == null ? "" : String.valueOf(s.eco2)).append(',')
                         .append(s == null ? "" : String.valueOf(s.timestamp)).append(',')
+                        .append(s == null ? "" : s.hmacTagHex()).append(',')
+                        .append(formatCoordinate(record.latitude)).append(',')
+                        .append(formatCoordinate(record.longitude)).append(',')
+                        .append(csv(record.getUploadResult())).append(',')
+                        .append(record.meta.txPowerText()).append(',')
+                        .append(record.meta.phyName(record.meta.primaryPhy)).append(',')
+                        .append(record.meta.phyName(record.meta.secondaryPhy)).append(',')
+                        .append(record.meta.advertisingSidText()).append(',')
+                        .append(record.meta.legacyText()).append(',')
+                        .append(record.meta.dataStatusName()).append(',')
                         .append(csv(record.rawHex)).append(',')
                         .append(csv(record.scanRecordHex)).append('\n');
             }
@@ -62,6 +73,10 @@ public final class CsvExporter {
 
     private static String formatFloat(float value) {
         return String.format(Locale.US, "%.2f", value);
+    }
+
+    private static String formatCoordinate(double value) {
+        return String.format(Locale.US, "%.6f", value);
     }
 
     private static String csv(String value) {
