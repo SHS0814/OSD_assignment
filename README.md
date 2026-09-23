@@ -63,8 +63,8 @@ targetSdk 를 낮추면 백그라운드 수집 동작이 달라집니다.
 ```json
 {
   "key": "opensrc2026",
-  "team": "team9",
-  "sensor": "opensrc_week_3",
+  "team": "9",
+  "sensor": "environment_sensor",
   "mac": "AA:BB:CC:DD:EE:FF",
   "temp": 27.64,
   "humidity": 51.71,

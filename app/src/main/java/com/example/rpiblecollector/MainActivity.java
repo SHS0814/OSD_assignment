@@ -25,12 +25,15 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.RadioGroup;
+import android.widget.Spinner;
 import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -39,13 +42,10 @@ public class MainActivity extends Activity {
     private static final int PERMISSION_REQUEST_CODE = 100;
     private static final int ENABLE_BLUETOOTH_REQUEST_CODE = 101;
     private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 102;
-    private static final int LOCATION_PERMISSION_REQUEST_CODE = 103;
     private static final int MAX_VISIBLE_ROWS = 100;
     private static final String PREFS_NAME = "collector_preferences";
     private static final String PREF_NOTIFICATION_PERMISSION_ASKED =
             "notification_permission_asked";
-    private static final String PREF_LOCATION_PERMISSION_ASKED =
-            "location_permission_asked";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<BleRecord> collectedRecords = new ArrayList<>();
@@ -79,7 +79,22 @@ public class MainActivity extends Activity {
     private EditText teamInput;
     private EditText sensorInput;
     private EditText intervalInput;
+    private EditText latInput;
+    private EditText lonInput;
     private CheckBox autoUploadCheck;
+    private CheckBox diagnosticCheck;
+    private RadioGroup modeGroup;
+    private EditText testCountInput;
+    private Button testSendButton;
+    private TextView sendLogText;
+    private Spinner sourceSpinner;
+    private TextView sourceInfoText;
+    private final List<File> csvFiles = new ArrayList<>();
+    private ScrollView sendLogScroll;
+    private View pageCollect;
+    private View pageSend;
+    private TextView tabCollect;
+    private TextView tabSend;
     private ArrayAdapter<String> scanListAdapter;
 
     private final Runnable elapsedTicker = new Runnable() {
@@ -131,11 +146,17 @@ public class MainActivity extends Activity {
         public void onCsvSaved(File file) {
             Toast.makeText(MainActivity.this,
                     "CSV 저장 완료\n" + file.getName(), Toast.LENGTH_LONG).show();
+            reloadSourceList();
         }
 
         @Override
         public void onCsvSaveFailed(String message) {
             Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+        }
+
+        @Override
+        public void onUploadDetail(String line) {
+            appendSendLog(line);
         }
 
         @Override
@@ -181,7 +202,21 @@ public class MainActivity extends Activity {
         teamInput = findViewById(R.id.teamInput);
         sensorInput = findViewById(R.id.sensorInput);
         intervalInput = findViewById(R.id.intervalInput);
+        latInput = findViewById(R.id.latInput);
+        lonInput = findViewById(R.id.lonInput);
         autoUploadCheck = findViewById(R.id.autoUploadCheck);
+        diagnosticCheck = findViewById(R.id.diagnosticCheck);
+        modeGroup = findViewById(R.id.modeGroup);
+        testCountInput = findViewById(R.id.testCountInput);
+        testSendButton = findViewById(R.id.testSendButton);
+        sendLogText = findViewById(R.id.sendLogText);
+        sourceSpinner = findViewById(R.id.sourceSpinner);
+        sourceInfoText = findViewById(R.id.sourceInfoText);
+        sendLogScroll = findViewById(R.id.sendLogScroll);
+        pageCollect = findViewById(R.id.pageCollect);
+        pageSend = findViewById(R.id.pageSend);
+        tabCollect = findViewById(R.id.tabCollect);
+        tabSend = findViewById(R.id.tabSend);
         ListView scanList = findViewById(R.id.scanList);
 
         scanListAdapter = new ArrayAdapter<>(this,
@@ -196,19 +231,34 @@ public class MainActivity extends Activity {
         saveButton.setOnClickListener(v -> saveCsv());
         uploadButton.setOnClickListener(v -> uploadLatest());
         checkPageButton.setOnClickListener(v -> openCheckPage());
+        testSendButton.setOnClickListener(v -> sendTestBatch());
+        tabCollect.setOnClickListener(v -> showPage(true));
+        tabSend.setOnClickListener(v -> showPage(false));
+        showPage(true);
+        reloadSourceList();
 
         applyUploadConfig(UploadConfig.load(this));
         teamInput.addTextChangedListener(configWatcher);
         sensorInput.addTextChangedListener(configWatcher);
         intervalInput.addTextChangedListener(configWatcher);
+        latInput.addTextChangedListener(configWatcher);
+        lonInput.addTextChangedListener(configWatcher);
         autoUploadCheck.setOnCheckedChangeListener((v, checked) -> {
             if (applyingConfig) {
                 return;
             }
-            if (checked) {
-                ensureLocationPermission();
-            }
             pushUploadConfig();
+        });
+        diagnosticCheck.setOnCheckedChangeListener((v, checked) -> {
+            if (applyingConfig) {
+                return;
+            }
+            if (serviceBound) {
+                scanService.setDiagnosticScan(checked);
+            }
+            appendLocalLog(checked
+                    ? "진단 모드: 다음 스캔부터 필터 없이 주변 광고를 모두 확인합니다."
+                    : "진단 모드 해제: 0x181A 필터를 사용합니다.");
         });
         updateUploadStatusText();
 
@@ -292,24 +342,6 @@ public class MainActivity extends Activity {
                 && !wasAsked(PREF_NOTIFICATION_PERMISSION_ASKED);
     }
 
-    /** PDF 21쪽 요청 양식의 lat/lon 을 채우기 위해 한 번만 위치 권한을 물어본다. */
-    private void ensureLocationPermission() {
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED) {
-            return;
-        }
-        if (wasAsked(PREF_LOCATION_PERMISSION_ASKED)) {
-            return;
-        }
-        markAsked(PREF_LOCATION_PERMISSION_ASKED);
-        Toast.makeText(this, R.string.location_permission_rationale,
-                Toast.LENGTH_LONG).show();
-        requestPermissions(new String[]{
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-        }, LOCATION_PERMISSION_REQUEST_CODE);
-    }
-
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions,
                                            int[] grantResults) {
@@ -333,12 +365,6 @@ public class MainActivity extends Activity {
                 appendLocalLog("알림 권한이 없어 수집 알림이 제한될 수 있습니다.");
             }
             startForegroundScan();
-        } else if (requestCode == LOCATION_PERMISSION_REQUEST_CODE) {
-            boolean granted = grantResults.length > 0
-                    && grantResults[0] == PackageManager.PERMISSION_GRANTED;
-            appendLocalLog(granted
-                    ? "위치 권한 승인 완료. lat/lon 을 함께 전송합니다."
-                    : "위치 권한이 없어 lat/lon 은 0.0 으로 전송됩니다.");
         }
     }
 
@@ -405,6 +431,113 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 하단 탭 전환. 앱을 열면 수집 페이지가 먼저 보인다. */
+    private void showPage(boolean collect) {
+        pageCollect.setVisibility(collect ? View.VISIBLE : View.GONE);
+        pageSend.setVisibility(collect ? View.GONE : View.VISIBLE);
+        tabCollect.setTextColor(getColor(collect ? R.color.blue : R.color.text_secondary));
+        tabSend.setTextColor(getColor(collect ? R.color.text_secondary : R.color.blue));
+    }
+
+    /** 전송할 데이터 목록을 채운다: 메모리 기록 + 저장된 CSV 파일들. */
+    private void reloadSourceList() {
+        csvFiles.clear();
+        csvFiles.addAll(CsvImporter.listCsvFiles(this));
+        List<String> labels = new ArrayList<>();
+        labels.add(getString(R.string.source_memory));
+        for (File f : csvFiles) {
+            labels.add(f.getName());
+        }
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        sourceSpinner.setAdapter(adapter);
+        sourceSpinner.setOnItemSelectedListener(
+                new android.widget.AdapterView.OnItemSelectedListener() {
+                    @Override
+                    public void onItemSelected(android.widget.AdapterView<?> parent,
+                                               View view, int position, long id) {
+                        describeSource(position);
+                    }
+
+                    @Override
+                    public void onNothingSelected(android.widget.AdapterView<?> parent) {
+                    }
+                });
+        describeSource(0);
+    }
+
+    private void describeSource(int position) {
+        List<BleRecord> records = loadSource(position);
+        String label = position == 0
+                ? getString(R.string.source_memory)
+                : csvFiles.get(position - 1).getName();
+        sourceInfoText.setText(getString(R.string.source_info, label, records.size()));
+    }
+
+    /** 선택된 항목의 레코드를 반환한다. 0번은 메모리, 그 뒤는 CSV 파일. */
+    private List<BleRecord> loadSource(int position) {
+        if (position <= 0) {
+            return serviceBound
+                    ? scanService.getRecordsSnapshot()
+                    : new ArrayList<>(collectedRecords);
+        }
+        File file = csvFiles.get(position - 1);
+        try {
+            return CsvImporter.load(file);
+        } catch (IOException e) {
+            appendSendLog(getString(R.string.source_load_failed, e.getMessage()));
+            return new ArrayList<>();
+        }
+    }
+
+    /** 전송 페이지의 테스트 전송: 최근 N건을 선택한 모드로 보낸다. */
+    private void sendTestBatch() {
+        if (!serviceBound) {
+            Toast.makeText(this, "서비스에 연결되지 않았습니다.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (TextUtils.isEmpty(teamInput.getText().toString().trim())) {
+            Toast.makeText(this, "팀 번호를 입력해 주세요.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        int count = 5;
+        try {
+            String raw = testCountInput.getText().toString().trim();
+            if (!raw.isEmpty()) {
+                count = Math.max(1, Integer.parseInt(raw));
+            }
+        } catch (NumberFormatException ignored) {
+            // 입력이 비정상이면 기본 5건
+        }
+        pushUploadConfig();
+        int position = sourceSpinner.getSelectedItemPosition();
+        List<BleRecord> source = loadSource(position);
+        int sent = scanService.uploadRecords(source, count, selectedMode());
+        if (sent == 0) {
+            Toast.makeText(this, R.string.no_record_to_send, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private TestMode selectedMode() {
+        int id = modeGroup.getCheckedRadioButtonId();
+        if (id == R.id.modeNoRaw) {
+            return TestMode.NO_RAW;
+        }
+        if (id == R.id.modeBadTag) {
+            return TestMode.BAD_TAG;
+        }
+        if (id == R.id.modeBadValue) {
+            return TestMode.BAD_VALUE;
+        }
+        return TestMode.NORMAL;
+    }
+
+    private void appendSendLog(String line) {
+        sendLogText.append(line + "\n");
+        sendLogScroll.post(() -> sendLogScroll.fullScroll(View.FOCUS_DOWN));
+    }
+
     /** PDF 26쪽: 수집한 데이터 실시간 확인 페이지를 브라우저로 연다. */
     private void openCheckPage() {
         try {
@@ -419,6 +552,8 @@ public class MainActivity extends Activity {
         teamInput.setText(config.team);
         sensorInput.setText(config.sensor);
         intervalInput.setText(String.valueOf(config.intervalSeconds));
+        latInput.setText(formatCoordinate(config.latitude));
+        lonInput.setText(formatCoordinate(config.longitude));
         autoUploadCheck.setChecked(config.autoUpload);
         applyingConfig = false;
     }
@@ -449,7 +584,26 @@ public class MainActivity extends Activity {
                 teamInput.getText().toString(),
                 sensorInput.getText().toString(),
                 autoUploadCheck.isChecked(),
-                interval);
+                interval,
+                parseCoordinate(latInput),
+                parseCoordinate(lonInput));
+    }
+
+    /** 입력이 끝나지 않았거나 비어 있으면 0.0 으로 둔다. */
+    private static double parseCoordinate(EditText input) {
+        String raw = input.getText().toString().trim();
+        if (raw.isEmpty() || raw.equals("-") || raw.equals(".") || raw.equals("-.")) {
+            return 0.0;
+        }
+        try {
+            return Double.parseDouble(raw);
+        } catch (NumberFormatException e) {
+            return 0.0;
+        }
+    }
+
+    private static String formatCoordinate(double value) {
+        return value == 0.0 ? "" : String.format(Locale.US, "%.6f", value);
     }
 
     private void syncFromService() {
@@ -466,6 +620,9 @@ public class MainActivity extends Activity {
         }
 
         applyUploadConfig(scanService.getUploadConfig());
+        applyingConfig = true;
+        diagnosticCheck.setChecked(scanService.isDiagnosticScan());
+        applyingConfig = false;
         if (!collectedRecords.isEmpty()) {
             updateLatestSensor(collectedRecords.get(collectedRecords.size() - 1));
         }
@@ -485,6 +642,17 @@ public class MainActivity extends Activity {
 
         handler.removeCallbacks(elapsedTicker);
         updateStatusText();
+        diagnosticCheck.setOnCheckedChangeListener((v, checked) -> {
+            if (applyingConfig) {
+                return;
+            }
+            if (serviceBound) {
+                scanService.setDiagnosticScan(checked);
+            }
+            appendLocalLog(checked
+                    ? "진단 모드: 다음 스캔부터 필터 없이 주변 광고를 모두 확인합니다."
+                    : "진단 모드 해제: 0x181A 필터를 사용합니다.");
+        });
         updateUploadStatusText();
         if (scanning) {
             handler.postDelayed(elapsedTicker, 1000L);

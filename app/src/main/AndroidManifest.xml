@@ -18,9 +18,10 @@
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
 
-    <!-- 4주차 PDF 21쪽 요청 양식의 lat/lon 을 채우기 위한 위치 권한 -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Android 11 이하: 3주차 PDF 17~18쪽의 권한 구성을 대상 SDK에 맞게 제한 -->
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
 
     <!-- Android 12 이상 BLE 런타임 권한 -->
     <uses-permission

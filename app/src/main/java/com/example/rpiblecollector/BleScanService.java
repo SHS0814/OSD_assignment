@@ -19,6 +19,7 @@ import android.bluetooth.le.ScanSettings;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.location.LocationManager;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
@@ -27,12 +28,16 @@ import android.os.Looper;
 import android.os.ParcelUuid;
 import android.os.SystemClock;
 import android.text.TextUtils;
+import android.util.Log;
 
 import java.io.File;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -56,6 +61,7 @@ public final class BleScanService extends Service {
     public static final String ACTION_UPLOAD_LATEST =
             "com.example.rpiblecollector.action.UPLOAD_LATEST";
 
+    public static final String LOG_TAG = "BleCollector";
     private static final String NOTIFICATION_CHANNEL_ID = "ble_collection";
     private static final int NOTIFICATION_ID = 1810;
     private static final int MAX_LOG_LINES = 200;
@@ -71,6 +77,7 @@ public final class BleScanService extends Service {
         void onCsvSaved(File file);
         void onCsvSaveFailed(String message);
         void onUploadResult(boolean success, String message);
+        void onUploadDetail(String line);
     }
 
     public static final class ScanState {
@@ -137,7 +144,6 @@ public final class BleScanService extends Service {
 
     // --- HTTP 전송 (4주차 PDF) ---
     private SensorUploader uploader;
-    private LocationTracker locationTracker;
     private UploadConfig uploadConfig;
     private String senderId;
     private int uploadSuccessCount;
@@ -146,6 +152,11 @@ public final class BleScanService extends Service {
     private long lastUploadedSensorTimestamp = -1L;
     private String lastServerMessage;
     private boolean loggedPacketLayout;
+    /** 필터를 걸지 않고 주변 광고를 전부 확인하는 진단 모드. */
+    private boolean diagnosticScan;
+    private final Set<String> diagnosticSeen = new HashSet<>();
+    /** 필터를 통과했지만 0x181A ServiceData 가 없어 버린 광고 수. */
+    private volatile int nonTargetCount;
 
     private final SensorUploader.UploadCallback uploadCallback =
             new SensorUploader.UploadCallback() {
@@ -154,6 +165,7 @@ public final class BleScanService extends Service {
                     uploadSuccessCount++;
                     lastServerMessage = body.summary();
                     addLog("HTTP 200 · " + lastServerMessage);
+                    notifyUploadDetail("  ✓ " + lastServerMessage);
                     markUploadResult(sent, "success");
                     if (listener != null) {
                         listener.onUploadResult(true, lastServerMessage);
@@ -167,6 +179,7 @@ public final class BleScanService extends Service {
                     uploadFailureCount++;
                     lastServerMessage = message;
                     addLog("전송 실패 · " + message);
+                    notifyUploadDetail("  ✗ " + message);
                     markUploadResult(sent, "fail: " + message);
                     if (listener != null) {
                         listener.onUploadResult(false, message);
@@ -206,7 +219,6 @@ public final class BleScanService extends Service {
         BluetoothManager manager = getSystemService(BluetoothManager.class);
         bluetoothAdapter = manager == null ? null : manager.getAdapter();
         uploader = new SensorUploader();
-        locationTracker = new LocationTracker(this);
         uploadConfig = UploadConfig.load(this);
         senderId = UploadConfig.senderId(this);
         createNotificationChannel();
@@ -261,6 +273,15 @@ public final class BleScanService extends Service {
         return new ArrayList<>(logLines);
     }
 
+    public boolean isDiagnosticScan() {
+        return diagnosticScan;
+    }
+
+    /** 스캔 중에 바꾸면 다음 스캔부터 적용된다. */
+    public void setDiagnosticScan(boolean diagnosticScan) {
+        this.diagnosticScan = diagnosticScan;
+    }
+
     public UploadConfig getUploadConfig() {
         return uploadConfig;
     }
@@ -275,9 +296,6 @@ public final class BleScanService extends Service {
                     ? "자동 전송 켜짐 · " + config.intervalSeconds + "초마다 POST "
                             + SensorUploader.BASE_URL + SensorUploader.SEND_PATH
                     : "자동 전송 꺼짐.");
-            if (config.autoUpload) {
-                locationTracker.start();
-            }
         }
         notifyStateChanged();
     }
@@ -307,8 +325,10 @@ public final class BleScanService extends Service {
         scanning = false;
         scanStoppedAt = System.currentTimeMillis();
         long elapsed = scanStoppedAt - scanStartedAt;
-        locationTracker.stop();
         addLog("BLE 스캔 중지.");
+        if (nonTargetCount > 0) {
+            addLog("0x181A 가 아닌 광고 " + nonTargetCount + "건은 기록하지 않았습니다.");
+        }
         if (elapsed < RECOMMENDED_COLLECTION_MILLIS) {
             addLog("안내: PDF 실습 기준 수집 시간은 10분 이상입니다.");
         }
@@ -404,26 +424,42 @@ public final class BleScanService extends Service {
             return;
         }
 
-        ScanFilter filter = new ScanFilter.Builder()
-                .setServiceUuid(TARGET_UUID)
-                .build();
+        // 필터 두 개를 넘기면 Android 가 OR 로 처리한다.
+        //  (1) 0x03 Service UUID 목록 AD 로 매칭 (3주차 PDF 예제와 동일)
+        //  (2) 0x16 Service Data AD 로 매칭 — 광고에 HMAC 태그가 붙어 길이가 늘면서
+        //      펌웨어가 (1) 의 UUID 목록 AD 를 빼더라도 놓치지 않기 위함
+        List<ScanFilter> filters = new ArrayList<>();
+        if (!diagnosticScan) {
+            filters.add(new ScanFilter.Builder()
+                    .setServiceUuid(TARGET_UUID)
+                    .build());
+            filters.add(new ScanFilter.Builder()
+                    .setServiceData(TARGET_UUID, new byte[0], new byte[0])
+                    .build());
+        }
         ScanSettings settings = new ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
                 .build();
         try {
-            bluetoothLeScanner.startScan(Collections.singletonList(filter), settings, scanCallback);
+            // 진단 모드에서는 필터를 걸지 않아 주변 광고를 전부 받는다.
+            bluetoothLeScanner.startScan(filters.isEmpty() ? null : filters,
+                    settings, scanCallback);
             scanning = true;
             scanStartedAt = System.currentTimeMillis();
             scanStoppedAt = 0L;
-            locationTracker.start();
-            addLog("BLE 스캔 시작: UUID 0x181A · Foreground Service");
+            diagnosticSeen.clear();
+            nonTargetCount = 0;
+            addLog(diagnosticScan
+                    ? "BLE 스캔 시작: 필터 없음(진단 모드) · 주변 광고를 모두 확인합니다"
+                    : "BLE 스캔 시작: UUID 0x181A 필터 2종(UUID 목록 + ServiceData)");
+            if (!isLocationServiceEnabled()) {
+                addLog("경고: 시스템 '위치' 가 꺼져 있습니다. "
+                        + "켜지 않으면 스캔이 시작돼도 광고 패킷이 올라오지 않습니다.");
+            }
             if (uploadConfig.autoUpload) {
                 addLog("자동 전송 켜짐 · " + uploadConfig.intervalSeconds + "초마다 POST "
                         + SensorUploader.BASE_URL + SensorUploader.SEND_PATH);
-            }
-            if (!locationTracker.hasPermission()) {
-                addLog("위치 권한이 없어 lat/lon 은 0.0 으로 전송됩니다.");
             }
             updateForegroundNotification();
             notifyStateChanged();
@@ -434,8 +470,8 @@ public final class BleScanService extends Service {
 
     private void enqueueScanResult(ScanResult result) {
         long receivedAtMillis = System.currentTimeMillis();
-        double latitude = locationTracker.latitude();
-        double longitude = locationTracker.longitude();
+        double latitude = uploadConfig.latitude;
+        double longitude = uploadConfig.longitude;
         try {
             recordExecutor.execute(() ->
                     processScanResult(result, receivedAtMillis, latitude, longitude));
@@ -451,6 +487,15 @@ public final class BleScanService extends Service {
         // 남겨 두어야 "수신은 했는데 원본이 없는" 상황이 CSV 에서 드러난다.
         ScanRecord scanRecord = result.getScanRecord();
         byte[] serviceData = scanRecord == null ? null : scanRecord.getServiceData(TARGET_UUID);
+        // 하드웨어 필터는 0x181A 가 없는 광고도 통과시킬 수 있으므로 여기서 반드시 다시 거른다.
+        // 이 검사가 없으면 주변 BLE 기기가 전부 CSV 에 섞인다.
+        if (serviceData == null) {
+            nonTargetCount++;
+            if (diagnosticScan) {
+                logDiagnosticDevice(result, scanRecord);
+            }
+            return;
+        }
         SensorPacket sensor = SensorPacket.parse(serviceData);
         BluetoothDevice device = result.getDevice();
         String name = scanRecord == null ? null : scanRecord.getDeviceName();
@@ -467,6 +512,33 @@ public final class BleScanService extends Service {
                 result.getRssi(), TARGET_UUID.toString(), sensor, serviceDataHex,
                 scanRecordHex, latitude, longitude, AdvertisingMeta.from(result));
         mainHandler.post(() -> recordScanResult(record));
+    }
+
+    /** 진단 모드에서 0x181A 가 아닌 기기를 기기당 한 번만 로그로 남긴다. */
+    private void logDiagnosticDevice(ScanResult result, ScanRecord scanRecord) {
+        String address = hasConnectPermission()
+                ? result.getDevice().getAddress() : "permission-required";
+        if (!diagnosticSeen.add(address)) {
+            return;
+        }
+        String name = scanRecord == null ? null : scanRecord.getDeviceName();
+        List<ParcelUuid> uuids = scanRecord == null ? null : scanRecord.getServiceUuids();
+        Map<ParcelUuid, byte[]> data = scanRecord == null ? null : scanRecord.getServiceData();
+        StringBuilder sb = new StringBuilder("[진단] ")
+                .append(TextUtils.isEmpty(name) ? "(이름 없음)" : name)
+                .append(" ").append(address)
+                .append(" RSSI ").append(result.getRssi())
+                .append(" · UUID목록=").append(uuids == null ? "없음" : uuids.toString())
+                .append(" · ServiceData키=");
+        if (data == null || data.isEmpty()) {
+            sb.append("없음");
+        } else {
+            for (ParcelUuid k : data.keySet()) {
+                sb.append(k).append("(").append(data.get(k).length).append("B) ");
+            }
+        }
+        final String line = sb.toString();
+        mainHandler.post(() -> addLog(line));
     }
 
     private void recordScanResult(BleRecord record) {
@@ -542,6 +614,63 @@ public final class BleScanService extends Service {
         upload(record);
     }
 
+    /**
+     * 최근 센서 패킷 N건을 테스트 모드로 서버에 보낸다.
+     * 공용 서버이므로 250ms 간격을 두고 순차 전송한다.
+     *
+     * @return 실제로 전송을 시작한 건수
+     */
+    public int uploadRecent(int count, TestMode mode) {
+        return uploadRecords(collectedRecords, count, mode);
+    }
+
+    /**
+     * 주어진 레코드 목록에서 최근 N건을 골라 전송한다.
+     * 메모리에 수집한 기록뿐 아니라 저장된 CSV 에서 읽어온 기록도 보낼 수 있다.
+     */
+    public int uploadRecords(List<BleRecord> source, int count, TestMode mode) {
+        List<BleRecord> targets = new ArrayList<>();
+        for (int i = source.size() - 1; i >= 0 && targets.size() < count; i--) {
+            BleRecord record = source.get(i);
+            if (record.sensor != null) {
+                targets.add(record);
+            }
+        }
+        if (targets.isEmpty()) {
+            return 0;
+        }
+        Collections.reverse(targets); // 오래된 것부터 보낸다
+        addLog("테스트 전송 시작: " + targets.size() + "건 · 모드 " + mode.label());
+        notifyUploadDetail("── 테스트 전송 " + targets.size() + "건 · 모드 " + mode.label() + " ──");
+        for (int i = 0; i < targets.size(); i++) {
+            final BleRecord record = targets.get(i);
+            final int index = i + 1;
+            mainHandler.postDelayed(() -> uploadOne(record, mode, index), i * 250L);
+        }
+        return targets.size();
+    }
+
+    private void uploadOne(BleRecord record, TestMode mode, int index) {
+        PostData body = PostData.from(record, uploadConfig.team, uploadConfig.sensor,
+                senderId, mode);
+        if (body == null) {
+            notifyUploadDetail("[" + index + "] 건너뜀 · 센서 패킷 파싱 불가");
+            return;
+        }
+        notifyUploadDetail("[" + index + "] POST ts=" + body.getTimestamp()
+                + " raw=" + (body.getRaw() == null ? "(없음)" : body.getRaw()));
+        record.setUploadResult("sending");
+        lastUploadElapsed = SystemClock.elapsedRealtime();
+        lastUploadedSensorTimestamp = record.sensor.timestamp;
+        uploader.send(body, uploadCallback);
+    }
+
+    private void notifyUploadDetail(String line) {
+        if (listener != null) {
+            listener.onUploadDetail(line);
+        }
+    }
+
     /** PDF 21쪽 "데이터 전송 코드" 호출 지점. */
     private void upload(BleRecord record) {
         PostData body = PostData.from(record, uploadConfig.team, uploadConfig.sensor, senderId);
@@ -592,6 +721,22 @@ public final class BleScanService extends Service {
                 == PackageManager.PERMISSION_GRANTED;
     }
 
+    /**
+     * BLE 스캔은 시스템 '위치' 토글이 켜져 있어야 결과를 준다.
+     * 권한이 있어도 이 토글이 꺼져 있으면 콜백이 한 번도 오지 않는다.
+     */
+    private boolean isLocationServiceEnabled() {
+        LocationManager manager = getSystemService(LocationManager.class);
+        if (manager == null) {
+            return true;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return manager.isLocationEnabled();
+        }
+        return manager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                || manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+    }
+
     private boolean hasConnectPermission() {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.S
                 || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
@@ -623,6 +768,8 @@ public final class BleScanService extends Service {
     private void addLog(String message) {
         String time = new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date());
         String line = "[" + time + "] " + message;
+        // 화면 로그를 logcat 에도 남긴다: adb logcat -s BleCollector 로 바로 확인 가능
+        Log.i(LOG_TAG, message);
         logLines.add(line);
         if (logLines.size() > MAX_LOG_LINES) {
             logLines.remove(0);
@@ -764,7 +911,6 @@ public final class BleScanService extends Service {
             bluetoothLeScanner.stopScan(scanCallback);
         }
         scanning = false;
-        locationTracker.stop();
         recordExecutor.shutdown();
         fileExecutor.shutdown();
         super.onDestroy();
