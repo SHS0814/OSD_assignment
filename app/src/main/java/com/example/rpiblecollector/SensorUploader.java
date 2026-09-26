@@ -34,14 +34,22 @@ public final class SensorUploader {
     /** 전송 결과 콜백. Retrofit 이 Android 메인 스레드에서 호출한다. */
     public interface UploadCallback {
         void onUploadSuccess(PostData sent, PostResponse body);
-        void onUploadFailure(PostData sent, String message);
+
+        /**
+         * @param message 사람이 읽을 요약 문자열.
+         * @param response 서버가 내려준 실패 응답(result/message/status/verified/expected).
+         *                 네트워크 오류나 파싱 실패 등 서버 응답이 없을 때는 {@code null}.
+         */
+        void onUploadFailure(PostData sent, String message, PostResponse response);
     }
 
     private final Retrofit retrofit;
     private final CommData service;
+    /** 실패 응답(HTTP 400)의 errorBody 를 PostResponse 로 파싱하기 위해 보관한다. */
+    private final Gson gson;
 
     public SensorUploader() {
-        Gson gson = new GsonBuilder().setLenient().create();
+        gson = new GsonBuilder().setLenient().create();
         retrofit = new Retrofit.Builder()
                 .baseUrl(BASE_URL)
                 .addConverterFactory(ScalarsConverterFactory.create())
@@ -66,28 +74,48 @@ public final class SensorUploader {
             public void onResponse(Call<PostResponse> call, Response<PostResponse> response) {
                 if (!response.isSuccessful()) {
                     // PDF 13쪽의 상태 코드: 400 Bad Request, 404 Not Found, 500 Internal Server Error ...
-                    callback.onUploadFailure(body,
-                            "HTTP " + response.code() + " " + statusText(response.code()));
+                    // HTTP 400 실패 응답의 본문은 body 가 아니라 errorBody 로 온다.
+                    // 서버가 내려주는 result/message/status/expected 를 그대로 파싱해 전달한다.
+                    PostResponse err = parseError(response);
+                    if (err != null && (err.message != null || err.status != null)) {
+                        callback.onUploadFailure(body,
+                                "HTTP " + response.code() + " · " + err.summary(), err);
+                    } else {
+                        callback.onUploadFailure(body,
+                                "HTTP " + response.code() + " " + statusText(response.code()), err);
+                    }
                     return;
                 }
                 PostResponse parsed = response.body();
                 if (parsed == null) {
-                    callback.onUploadFailure(body, "HTTP 200 이지만 응답 본문이 비어 있습니다.");
+                    callback.onUploadFailure(body, "HTTP 200 이지만 응답 본문이 비어 있습니다.", null);
                     return;
                 }
                 if (parsed.isSuccess()) {
                     callback.onUploadSuccess(body, parsed);
                 } else {
-                    callback.onUploadFailure(body, parsed.summary());
+                    callback.onUploadFailure(body, parsed.summary(), parsed);
                 }
             }
 
             @Override
             public void onFailure(Call<PostResponse> call, Throwable t) {
                 callback.onUploadFailure(body,
-                        t.getClass().getSimpleName() + ": " + t.getMessage());
+                        t.getClass().getSimpleName() + ": " + t.getMessage(), null);
             }
         });
+    }
+
+    /** 실패 응답(HTTP 400)의 errorBody 를 PostResponse 로 파싱한다. 실패하면 null. */
+    private PostResponse parseError(Response<PostResponse> response) {
+        if (response.errorBody() == null) {
+            return null;
+        }
+        try {
+            return gson.fromJson(response.errorBody().charStream(), PostResponse.class);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** PDF 13쪽의 대표 상태 코드. */

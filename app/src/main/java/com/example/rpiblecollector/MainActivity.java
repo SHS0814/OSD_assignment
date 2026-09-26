@@ -25,15 +25,12 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
-import android.widget.RadioGroup;
-import android.widget.Spinner;
 import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -83,13 +80,7 @@ public class MainActivity extends Activity {
     private EditText lonInput;
     private CheckBox autoUploadCheck;
     private CheckBox diagnosticCheck;
-    private RadioGroup modeGroup;
-    private EditText testCountInput;
-    private Button testSendButton;
     private TextView sendLogText;
-    private Spinner sourceSpinner;
-    private TextView sourceInfoText;
-    private final List<File> csvFiles = new ArrayList<>();
     private ScrollView sendLogScroll;
     private View pageCollect;
     private View pageSend;
@@ -146,7 +137,6 @@ public class MainActivity extends Activity {
         public void onCsvSaved(File file) {
             Toast.makeText(MainActivity.this,
                     "CSV 저장 완료\n" + file.getName(), Toast.LENGTH_LONG).show();
-            reloadSourceList();
         }
 
         @Override
@@ -206,12 +196,7 @@ public class MainActivity extends Activity {
         lonInput = findViewById(R.id.lonInput);
         autoUploadCheck = findViewById(R.id.autoUploadCheck);
         diagnosticCheck = findViewById(R.id.diagnosticCheck);
-        modeGroup = findViewById(R.id.modeGroup);
-        testCountInput = findViewById(R.id.testCountInput);
-        testSendButton = findViewById(R.id.testSendButton);
         sendLogText = findViewById(R.id.sendLogText);
-        sourceSpinner = findViewById(R.id.sourceSpinner);
-        sourceInfoText = findViewById(R.id.sourceInfoText);
         sendLogScroll = findViewById(R.id.sendLogScroll);
         pageCollect = findViewById(R.id.pageCollect);
         pageSend = findViewById(R.id.pageSend);
@@ -231,11 +216,9 @@ public class MainActivity extends Activity {
         saveButton.setOnClickListener(v -> saveCsv());
         uploadButton.setOnClickListener(v -> uploadLatest());
         checkPageButton.setOnClickListener(v -> openCheckPage());
-        testSendButton.setOnClickListener(v -> sendTestBatch());
         tabCollect.setOnClickListener(v -> showPage(true));
         tabSend.setOnClickListener(v -> showPage(false));
         showPage(true);
-        reloadSourceList();
 
         applyUploadConfig(UploadConfig.load(this));
         teamInput.addTextChangedListener(configWatcher);
@@ -437,100 +420,6 @@ public class MainActivity extends Activity {
         pageSend.setVisibility(collect ? View.GONE : View.VISIBLE);
         tabCollect.setTextColor(getColor(collect ? R.color.blue : R.color.text_secondary));
         tabSend.setTextColor(getColor(collect ? R.color.text_secondary : R.color.blue));
-    }
-
-    /** 전송할 데이터 목록을 채운다: 메모리 기록 + 저장된 CSV 파일들. */
-    private void reloadSourceList() {
-        csvFiles.clear();
-        csvFiles.addAll(CsvImporter.listCsvFiles(this));
-        List<String> labels = new ArrayList<>();
-        labels.add(getString(R.string.source_memory));
-        for (File f : csvFiles) {
-            labels.add(f.getName());
-        }
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, labels);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        sourceSpinner.setAdapter(adapter);
-        sourceSpinner.setOnItemSelectedListener(
-                new android.widget.AdapterView.OnItemSelectedListener() {
-                    @Override
-                    public void onItemSelected(android.widget.AdapterView<?> parent,
-                                               View view, int position, long id) {
-                        describeSource(position);
-                    }
-
-                    @Override
-                    public void onNothingSelected(android.widget.AdapterView<?> parent) {
-                    }
-                });
-        describeSource(0);
-    }
-
-    private void describeSource(int position) {
-        List<BleRecord> records = loadSource(position);
-        String label = position == 0
-                ? getString(R.string.source_memory)
-                : csvFiles.get(position - 1).getName();
-        sourceInfoText.setText(getString(R.string.source_info, label, records.size()));
-    }
-
-    /** 선택된 항목의 레코드를 반환한다. 0번은 메모리, 그 뒤는 CSV 파일. */
-    private List<BleRecord> loadSource(int position) {
-        if (position <= 0) {
-            return serviceBound
-                    ? scanService.getRecordsSnapshot()
-                    : new ArrayList<>(collectedRecords);
-        }
-        File file = csvFiles.get(position - 1);
-        try {
-            return CsvImporter.load(file);
-        } catch (IOException e) {
-            appendSendLog(getString(R.string.source_load_failed, e.getMessage()));
-            return new ArrayList<>();
-        }
-    }
-
-    /** 전송 페이지의 테스트 전송: 최근 N건을 선택한 모드로 보낸다. */
-    private void sendTestBatch() {
-        if (!serviceBound) {
-            Toast.makeText(this, "서비스에 연결되지 않았습니다.", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        if (TextUtils.isEmpty(teamInput.getText().toString().trim())) {
-            Toast.makeText(this, "팀 번호를 입력해 주세요.", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        int count = 5;
-        try {
-            String raw = testCountInput.getText().toString().trim();
-            if (!raw.isEmpty()) {
-                count = Math.max(1, Integer.parseInt(raw));
-            }
-        } catch (NumberFormatException ignored) {
-            // 입력이 비정상이면 기본 5건
-        }
-        pushUploadConfig();
-        int position = sourceSpinner.getSelectedItemPosition();
-        List<BleRecord> source = loadSource(position);
-        int sent = scanService.uploadRecords(source, count, selectedMode());
-        if (sent == 0) {
-            Toast.makeText(this, R.string.no_record_to_send, Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private TestMode selectedMode() {
-        int id = modeGroup.getCheckedRadioButtonId();
-        if (id == R.id.modeNoRaw) {
-            return TestMode.NO_RAW;
-        }
-        if (id == R.id.modeBadTag) {
-            return TestMode.BAD_TAG;
-        }
-        if (id == R.id.modeBadValue) {
-            return TestMode.BAD_VALUE;
-        }
-        return TestMode.NORMAL;
     }
 
     private void appendSendLog(String line) {

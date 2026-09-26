@@ -128,12 +128,6 @@ public final class PostData {
      * @return 센서 패킷 파싱에 실패한 레코드면 {@code null}
      */
     public static PostData from(BleRecord record, String team, String sensor, String sender) {
-        return from(record, team, sensor, sender, TestMode.NORMAL);
-    }
-
-    /** 테스트 모드에 따라 일부러 잘못된 값을 넣어 서버 검증을 확인한다. */
-    public static PostData from(BleRecord record, String team, String sensor, String sender,
-                                TestMode mode) {
         SensorPacket packet = record.sensor;
         if (packet == null) {
             return null;
@@ -142,20 +136,10 @@ public final class PostData {
                 ? record.name
                 : sensor.trim();
         PostData body = new PostData();
-        double temp = round2(packet.temperature);
-        if (mode == TestMode.BAD_VALUE) {
-            temp = round2(packet.temperature + 10.0f); // raw 와 어긋나게 만든다
-        }
-        String raw = record.rawHex;
-        if (mode == TestMode.NO_RAW) {
-            raw = null; // Gson 기본 설정에서 null 필드는 JSON 에 실리지 않는다
-        } else if (mode == TestMode.BAD_TAG) {
-            raw = flipLastByte(raw);
-        }
         body.set_data(team, sensorName, record.address,
-                temp, round2(packet.humidity),
+                round2(packet.temperature), round2(packet.humidity),
                 packet.aqi, packet.tvoc, packet.eco2, packet.timestamp,
-                record.latitude, record.longitude, sender, raw);
+                record.latitude, record.longitude, sender, record.rawHex);
         return body;
     }
 
@@ -185,15 +169,6 @@ public final class PostData {
                 "team=%s sensor=%s mac=%s temp=%.2f humidity=%.2f AQI=%d TVOC=%d eCO2=%d ts=%d lat=%.5f lon=%.5f",
                 team, sensor, mac, temp, humidity, AQI, TVOC, eCO2, timestamp, lat, lon)
                 + " raw=" + raw;
-    }
-
-    /** HMAC 태그의 마지막 바이트를 뒤집어 태그 검증을 일부러 실패시킨다. */
-    private static String flipLastByte(String hex) {
-        if (hex == null || hex.length() < 2) {
-            return hex;
-        }
-        int last = Integer.parseInt(hex.substring(hex.length() - 2), 16) ^ 0xFF;
-        return hex.substring(0, hex.length() - 2) + String.format(Locale.US, "%02X", last);
     }
 
     private static double round2(float value) {

@@ -34,7 +34,6 @@ import java.io.File;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -175,12 +174,16 @@ public final class BleScanService extends Service {
                 }
 
                 @Override
-                public void onUploadFailure(PostData sent, String message) {
+                public void onUploadFailure(PostData sent, String message, PostResponse response) {
                     uploadFailureCount++;
                     lastServerMessage = message;
                     addLog("전송 실패 · " + message);
                     notifyUploadDetail("  ✗ " + message);
-                    markUploadResult(sent, "fail: " + message);
+                    // 서버가 status 로 실패 원인을 구분해 준다: no_raw / bad_raw / bad_tag / value_mismatch.
+                    String resultTag = (response != null && response.status != null)
+                            ? "fail(" + response.status + "): " + message
+                            : "fail: " + message;
+                    markUploadResult(sent, resultTag);
                     if (listener != null) {
                         listener.onUploadResult(false, message);
                     }
@@ -612,57 +615,6 @@ public final class BleScanService extends Service {
             return;
         }
         upload(record);
-    }
-
-    /**
-     * 최근 센서 패킷 N건을 테스트 모드로 서버에 보낸다.
-     * 공용 서버이므로 250ms 간격을 두고 순차 전송한다.
-     *
-     * @return 실제로 전송을 시작한 건수
-     */
-    public int uploadRecent(int count, TestMode mode) {
-        return uploadRecords(collectedRecords, count, mode);
-    }
-
-    /**
-     * 주어진 레코드 목록에서 최근 N건을 골라 전송한다.
-     * 메모리에 수집한 기록뿐 아니라 저장된 CSV 에서 읽어온 기록도 보낼 수 있다.
-     */
-    public int uploadRecords(List<BleRecord> source, int count, TestMode mode) {
-        List<BleRecord> targets = new ArrayList<>();
-        for (int i = source.size() - 1; i >= 0 && targets.size() < count; i--) {
-            BleRecord record = source.get(i);
-            if (record.sensor != null) {
-                targets.add(record);
-            }
-        }
-        if (targets.isEmpty()) {
-            return 0;
-        }
-        Collections.reverse(targets); // 오래된 것부터 보낸다
-        addLog("테스트 전송 시작: " + targets.size() + "건 · 모드 " + mode.label());
-        notifyUploadDetail("── 테스트 전송 " + targets.size() + "건 · 모드 " + mode.label() + " ──");
-        for (int i = 0; i < targets.size(); i++) {
-            final BleRecord record = targets.get(i);
-            final int index = i + 1;
-            mainHandler.postDelayed(() -> uploadOne(record, mode, index), i * 250L);
-        }
-        return targets.size();
-    }
-
-    private void uploadOne(BleRecord record, TestMode mode, int index) {
-        PostData body = PostData.from(record, uploadConfig.team, uploadConfig.sensor,
-                senderId, mode);
-        if (body == null) {
-            notifyUploadDetail("[" + index + "] 건너뜀 · 센서 패킷 파싱 불가");
-            return;
-        }
-        notifyUploadDetail("[" + index + "] POST ts=" + body.getTimestamp()
-                + " raw=" + (body.getRaw() == null ? "(없음)" : body.getRaw()));
-        record.setUploadResult("sending");
-        lastUploadElapsed = SystemClock.elapsedRealtime();
-        lastUploadedSensorTimestamp = record.sensor.timestamp;
-        uploader.send(body, uploadCallback);
     }
 
     private void notifyUploadDetail(String line) {
