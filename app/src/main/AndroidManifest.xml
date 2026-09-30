@@ -18,20 +18,22 @@
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
 
-    <!-- Android 11 이하: 3주차 PDF 17~18쪽의 권한 구성을 대상 SDK에 맞게 제한 -->
-    <uses-permission
-        android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="30" />
+    <!-- 요청 양식의 lat / lon 을 GPS 로 채운다 (5주차 PDF 48쪽).
+         Android 11 이하에서는 BLE 스캔에도 이 권한이 필요하다. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- Android 12 이상 BLE 런타임 권한 -->
-    <uses-permission
-        android:name="android.permission.BLUETOOTH_SCAN"
-        android:usesPermissionFlags="neverForLocation"
-        tools:targetApi="s" />
+    <!-- Android 12 이상 BLE 런타임 권한.
+         GPS 를 쓰므로 neverForLocation 을 두지 않는다 (두면 위치 권한과 함께 쓸 수 없다). -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Android 12 이상: 라즈베리 파이에 과거 데이터를 요청하는 광고 -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- 화면이 꺼진 동안에도 위치를 받기 위한 Foreground Service 유형 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <application
         android:allowBackup="true"
@@ -52,7 +54,7 @@
         <service
             android:name=".BleScanService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice"
+            android:foregroundServiceType="connectedDevice|location"
             android:stopWithTask="false" />
     </application>
 

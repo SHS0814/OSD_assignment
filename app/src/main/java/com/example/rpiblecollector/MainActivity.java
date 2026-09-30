@@ -60,6 +60,7 @@ public class MainActivity extends Activity {
     private int uploadSuccessCount;
     private int uploadFailureCount;
     private String lastServerMessage;
+    private String backlogSummary;
     /** 화면 값을 서비스 설정으로 되돌려 쓰는 동안에는 TextWatcher 를 무시한다. */
     private boolean applyingConfig;
 
@@ -303,6 +304,10 @@ public class MainActivity extends Activity {
             return checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
                     == PackageManager.PERMISSION_GRANTED
                     && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                    == PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
+                    == PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
                     == PackageManager.PERMISSION_GRANTED;
         }
         return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -311,13 +316,20 @@ public class MainActivity extends Activity {
 
     private void requestBlePermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // ADVERTISE: 파이에 과거 데이터를 요청하는 광고용
+            // FINE/COARSE: 전송할 lat / lon (Android 12 부터는 둘을 같이 요청해야 한다)
             requestPermissions(new String[]{
                     Manifest.permission.BLUETOOTH_SCAN,
-                    Manifest.permission.BLUETOOTH_CONNECT
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.BLUETOOTH_ADVERTISE,
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
             }, PERMISSION_REQUEST_CODE);
         } else {
-            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
-                    PERMISSION_REQUEST_CODE);
+            requestPermissions(new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+            }, PERMISSION_REQUEST_CODE);
         }
     }
 
@@ -333,16 +345,13 @@ public class MainActivity extends Activity {
                                            int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == PERMISSION_REQUEST_CODE) {
-            boolean granted = grantResults.length > 0;
-            for (int result : grantResults) {
-                granted &= result == PackageManager.PERMISSION_GRANTED;
-            }
-            if (granted) {
+            // "대략적인 위치"만 허용해도 COARSE 결과 하나만 거부되므로 필요한 권한을 다시 확인한다.
+            if (hasBlePermissions()) {
                 appendLocalLog("BLE 권한 승인 완료.");
                 prepareAndStartScan();
             } else {
-                appendLocalLog("BLE 권한이 거부되어 스캔할 수 없습니다.");
-                Toast.makeText(this, "주변 기기 권한을 허용해 주세요.",
+                appendLocalLog("BLE·위치 권한이 거부되어 스캔할 수 없습니다.");
+                Toast.makeText(this, "주변 기기와 정확한 위치 권한을 허용해 주세요.",
                         Toast.LENGTH_LONG).show();
             }
         } else if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
@@ -533,6 +542,7 @@ public class MainActivity extends Activity {
         uploadSuccessCount = state.uploadSuccessCount;
         uploadFailureCount = state.uploadFailureCount;
         lastServerMessage = state.lastServerMessage;
+        backlogSummary = state.backlogSummary;
 
         handler.removeCallbacks(elapsedTicker);
         updateStatusText();
@@ -587,8 +597,12 @@ public class MainActivity extends Activity {
         String response = TextUtils.isEmpty(lastServerMessage)
                 ? getString(R.string.upload_status_no_response)
                 : lastServerMessage;
-        uploadStatusText.setText(getString(R.string.upload_status_format,
-                uploadSuccessCount, uploadFailureCount, response));
+        String status = getString(R.string.upload_status_format,
+                uploadSuccessCount, uploadFailureCount, response);
+        if (!TextUtils.isEmpty(backlogSummary)) {
+            status += "\n" + backlogSummary;
+        }
+        uploadStatusText.setText(status);
     }
 
     private void addVisibleRecord(BleRecord record) {

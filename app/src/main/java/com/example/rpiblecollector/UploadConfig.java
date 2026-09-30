@@ -46,9 +46,8 @@ public final class UploadConfig {
     public final boolean autoUpload;
     public final int intervalSeconds;
     /**
-     * 요청 양식의 lat / lon. 센서(라즈베리 파이)가 고정 위치에 있으므로
-     * GPS 대신 화면에서 입력받는다. Android 12+ 에서 위치 권한을 선언하면
-     * BLUETOOTH_SCAN 의 neverForLocation 과 충돌해 스캔이 막히기 때문이다.
+     * 요청 양식의 lat / lon 기본값. 실제 전송에는 GPS 위치(LocationTracker)를 쓰고,
+     * 위치를 얻지 못했을 때만 화면에서 입력한 이 좌표를 쓴다.
      */
     public final double latitude;
     public final double longitude;
