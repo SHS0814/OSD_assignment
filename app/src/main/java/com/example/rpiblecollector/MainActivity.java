@@ -73,8 +73,9 @@ public class MainActivity extends Activity {
     private Button saveButton;
     private Button uploadButton;
     private Button checkPageButton;
-    private EditText teamInput;
+    private EditText keyInput;
     private EditText sensorInput;
+    private EditText deviceNameInput;
     private EditText intervalInput;
     private EditText latInput;
     private EditText lonInput;
@@ -189,8 +190,9 @@ public class MainActivity extends Activity {
         uploadButton = findViewById(R.id.uploadButton);
         checkPageButton = findViewById(R.id.checkPageButton);
         uploadStatusText = findViewById(R.id.uploadStatusText);
-        teamInput = findViewById(R.id.teamInput);
+        keyInput = findViewById(R.id.keyInput);
         sensorInput = findViewById(R.id.sensorInput);
+        deviceNameInput = findViewById(R.id.deviceNameInput);
         intervalInput = findViewById(R.id.intervalInput);
         latInput = findViewById(R.id.latInput);
         lonInput = findViewById(R.id.lonInput);
@@ -221,8 +223,9 @@ public class MainActivity extends Activity {
         showPage(true);
 
         applyUploadConfig(UploadConfig.load(this));
-        teamInput.addTextChangedListener(configWatcher);
+        keyInput.addTextChangedListener(configWatcher);
         sensorInput.addTextChangedListener(configWatcher);
+        deviceNameInput.addTextChangedListener(configWatcher);
         intervalInput.addTextChangedListener(configWatcher);
         latInput.addTextChangedListener(configWatcher);
         lonInput.addTextChangedListener(configWatcher);
@@ -399,10 +402,10 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** PDF 21쪽 API 로 최근 센서 패킷 1건을 즉시 POST 한다. */
+    /** 5주차 PDF 48쪽 API 로 최근 센서 패킷 1건을 즉시 POST 한다. */
     private void uploadLatest() {
-        if (TextUtils.isEmpty(teamInput.getText().toString().trim())) {
-            Toast.makeText(this, "팀 번호를 입력해 주세요.", Toast.LENGTH_SHORT).show();
+        if (TextUtils.isEmpty(keyInput.getText().toString().trim())) {
+            Toast.makeText(this, "팀별 API key 를 입력해 주세요.", Toast.LENGTH_SHORT).show();
             return;
         }
         pushUploadConfig();
@@ -427,7 +430,7 @@ public class MainActivity extends Activity {
         sendLogScroll.post(() -> sendLogScroll.fullScroll(View.FOCUS_DOWN));
     }
 
-    /** PDF 26쪽: 수집한 데이터 실시간 확인 페이지를 브라우저로 연다. */
+    /** 5주차 PDF 50쪽: 팀별 수집 현황 페이지를 브라우저로 연다. */
     private void openCheckPage() {
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(SensorUploader.CHECK_URL)));
@@ -438,8 +441,9 @@ public class MainActivity extends Activity {
 
     private void applyUploadConfig(UploadConfig config) {
         applyingConfig = true;
-        teamInput.setText(config.team);
+        keyInput.setText(config.apiKey);
         sensorInput.setText(config.sensor);
+        deviceNameInput.setText(config.deviceName);
         intervalInput.setText(String.valueOf(config.intervalSeconds));
         latInput.setText(formatCoordinate(config.latitude));
         lonInput.setText(formatCoordinate(config.longitude));
@@ -470,8 +474,9 @@ public class MainActivity extends Activity {
             // 입력이 끝나지 않은 상태에서는 기본 주기를 쓴다.
         }
         return new UploadConfig(
-                teamInput.getText().toString(),
+                keyInput.getText().toString(),
                 sensorInput.getText().toString(),
+                deviceNameInput.getText().toString(),
                 autoUploadCheck.isChecked(),
                 interval,
                 parseCoordinate(latInput),

@@ -164,8 +164,16 @@ public final class BleScanService extends Service {
                     uploadSuccessCount++;
                     lastServerMessage = body.summary();
                     addLog("HTTP 200 · " + lastServerMessage);
-                    notifyUploadDetail("  ✓ " + lastServerMessage);
-                    markUploadResult(sent, "success");
+                    // 5주차 PDF 49쪽: out_of_range 는 저장은 되지만 배선·단위 변환·Pi 시계를 점검해야 한다.
+                    if (body.isOutOfRange()) {
+                        addLog("경고: 서버가 값을 범위 이상(out_of_range)으로 표시했습니다. "
+                                + "detail 의 필드를 확인하세요 (배선, 단위 변환, Pi 시계 NTP).");
+                        notifyUploadDetail("  ⚠ " + lastServerMessage);
+                    } else {
+                        notifyUploadDetail("  ✓ " + lastServerMessage);
+                    }
+                    markUploadResult(sent, body.status == null
+                            ? "success" : "success(" + body.status + ")");
                     if (listener != null) {
                         listener.onUploadResult(true, lastServerMessage);
                     }
@@ -179,11 +187,8 @@ public final class BleScanService extends Service {
                     lastServerMessage = message;
                     addLog("전송 실패 · " + message);
                     notifyUploadDetail("  ✗ " + message);
-                    // 서버가 status 로 실패 원인을 구분해 준다: no_raw / bad_raw / bad_tag / value_mismatch.
-                    String resultTag = (response != null && response.status != null)
-                            ? "fail(" + response.status + "): " + message
-                            : "fail: " + message;
-                    markUploadResult(sent, resultTag);
+                    // HTTP 400 은 key 오류 또는 필수 값 누락이다. 원인은 message 에 담긴다.
+                    markUploadResult(sent, "fail: " + message);
                     if (listener != null) {
                         listener.onUploadResult(false, message);
                     }
@@ -289,7 +294,7 @@ public final class BleScanService extends Service {
         return uploadConfig;
     }
 
-    /** Activity 에서 팀 번호·센서 이름·자동 전송 설정을 바꿀 때 호출한다. */
+    /** Activity 에서 key·센서 이름·대상 장치·자동 전송 설정을 바꿀 때 호출한다. */
     public void setUploadConfig(UploadConfig config) {
         boolean autoChanged = uploadConfig.autoUpload != config.autoUpload;
         uploadConfig = config;
@@ -305,9 +310,11 @@ public final class BleScanService extends Service {
 
     /** 가장 최근에 파싱된 센서 패킷 하나를 즉시 서버로 보낸다(수동 전송). */
     public void uploadLatestRecord() {
-        BleRecord latest = latestParsedRecord();
+        BleRecord latest = latestUploadableRecord();
         if (latest == null) {
-            String message = "전송할 센서 패킷이 없습니다.";
+            String message = uploadConfig.deviceName.isEmpty()
+                    ? "전송할 센서 패킷이 없습니다."
+                    : "전송할 " + uploadConfig.deviceName + " 센서 패킷이 없습니다.";
             addLog(message);
             if (listener != null) {
                 listener.onUploadResult(false, message);
@@ -605,6 +612,11 @@ public final class BleScanService extends Service {
         if (!uploadConfig.autoUpload || record.sensor == null) {
             return;
         }
+        // 다른 팀 파이의 광고는 CSV 에만 남기고 우리 팀 key 로 보내지 않는다.
+        if (!uploadConfig.matchesDevice(record)) {
+            record.setUploadResult("skipped_other_device");
+            return;
+        }
         if (record.sensor.timestamp == lastUploadedSensorTimestamp) {
             record.setUploadResult("skipped_duplicate");
             return;
@@ -625,7 +637,14 @@ public final class BleScanService extends Service {
 
     /** PDF 21쪽 "데이터 전송 코드" 호출 지점. */
     private void upload(BleRecord record) {
-        PostData body = PostData.from(record, uploadConfig.team, uploadConfig.sensor, senderId);
+        if (uploadConfig.apiKey.isEmpty()) {
+            addLog("전송 실패 · 팀별 key 를 입력해 주세요.");
+            if (listener != null) {
+                listener.onUploadResult(false, "key 없음");
+            }
+            return;
+        }
+        PostData body = PostData.from(record, uploadConfig.apiKey, uploadConfig.sensor, senderId);
         if (body == null) {
             addLog("전송 실패 · 센서 패킷을 파싱하지 못한 레코드입니다.");
             if (listener != null) {
@@ -653,10 +672,11 @@ public final class BleScanService extends Service {
         }
     }
 
-    private BleRecord latestParsedRecord() {
+    private BleRecord latestUploadableRecord() {
         for (int i = collectedRecords.size() - 1; i >= 0; i--) {
-            if (collectedRecords.get(i).sensor != null) {
-                return collectedRecords.get(i);
+            BleRecord record = collectedRecords.get(i);
+            if (record.sensor != null && uploadConfig.matchesDevice(record)) {
+                return record;
             }
         }
         return null;

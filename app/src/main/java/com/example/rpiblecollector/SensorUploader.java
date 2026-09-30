@@ -24,11 +24,14 @@ import retrofit2.converter.scalars.ScalarsConverterFactory;
  * </pre>
  */
 public final class SensorUploader {
-    /** PDF 21쪽 요청 양식의 URL: {@code 203.255.81.72:10021/sensor/opensrc/test/} */
+    /**
+     * 5주차 PDF 48쪽 요청 양식의 URL: {@code 203.255.81.72:10021/sensor/opensrc/upload/}
+     * (4주차의 {@code .../test/} 에서 바뀌었다.)
+     */
     public static final String BASE_URL = "http://203.255.81.72:10021/";
-    public static final String SEND_PATH = "sensor/opensrc/test/";
-    /** PDF 26쪽: 수집한 데이터 실시간 확인 페이지. */
-    public static final String CHECK_PATH = "sensor/opensrc/check/";
+    public static final String SEND_PATH = "sensor/opensrc/upload/";
+    /** 5주차 PDF 50쪽: 팀별 수집 현황 페이지. */
+    public static final String CHECK_PATH = "sensor/opensrc/teams/";
     public static final String CHECK_URL = BASE_URL + CHECK_PATH;
 
     /** 전송 결과 콜백. Retrofit 이 Android 메인 스레드에서 호출한다. */
@@ -37,7 +40,7 @@ public final class SensorUploader {
 
         /**
          * @param message 사람이 읽을 요약 문자열.
-         * @param response 서버가 내려준 실패 응답(result/message/status/verified/expected).
+         * @param response 서버가 내려준 실패 응답(result/message).
          *                 네트워크 오류나 파싱 실패 등 서버 응답이 없을 때는 {@code null}.
          */
         void onUploadFailure(PostData sent, String message, PostResponse response);
@@ -55,7 +58,6 @@ public final class SensorUploader {
                 .addConverterFactory(ScalarsConverterFactory.create())
                 .addConverterFactory(GsonConverterFactory.create(gson))
                 .build();
-        // PDF 21쪽: 생성한 interface 객체를 retrofit 을 통해 생성
         service = retrofit.create(CommData.class);
     }
 
@@ -75,7 +77,7 @@ public final class SensorUploader {
                 if (!response.isSuccessful()) {
                     // PDF 13쪽의 상태 코드: 400 Bad Request, 404 Not Found, 500 Internal Server Error ...
                     // HTTP 400 실패 응답의 본문은 body 가 아니라 errorBody 로 온다.
-                    // 서버가 내려주는 result/message/status/expected 를 그대로 파싱해 전달한다.
+                    // 5주차 PDF 49쪽: key 오류·필수 값 누락은 errorBody() 로 읽는다.
                     PostResponse err = parseError(response);
                     if (err != null && (err.message != null || err.status != null)) {
                         callback.onUploadFailure(body,

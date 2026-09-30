@@ -1,14 +1,30 @@
 # Raspberry Pi BLE Collector (Java / Android Studio)
 
 수업 PDF의 3주차(BLE Communication)와 4주차(HTTP Communication) 예제를 기반으로 만든
-BLE 광고 패킷 수집 · 서버 전송 앱입니다.
-
-4주차 PDF 7쪽의 아키텍처 중 모바일 디바이스 구간을 그대로 구현합니다.
+BLE 광고 패킷 수집 · 서버 전송 앱입니다. 5주차(Raspberry Pi Programming)부터는
+우리 팀이 만든 라즈베리 파이 센서(`opensrc_team9`)의 데이터를 받아 서버로 올립니다.
 
 ```text
-Raspberry Pi ──BLE(0x181A)──▶ Android 앱 ──HTTP POST(JSON)──▶ 203.255.81.72:10021
-                                             ◀── Response(result/message/received_data)
+팀 라즈베리 파이 ──BLE(0x181A)──▶ Android 앱 ──HTTP POST(JSON)──▶ 203.255.81.72:10021/sensor/opensrc/upload/
+(opensrc_team9)                                  ◀── Response(result/message/received_data/status)
 ```
+
+## 5주차 변경 사항 (PDF 46~50쪽)
+
+| | 4주차 | 5주차 |
+|---|---|---|
+| 센서 | 연구실 라즈베리 파이 | 팀별 라즈베리 파이 (`opensrc_team9`) |
+| API URL | `/sensor/opensrc/test/` | `/sensor/opensrc/upload/` |
+| key | 공용 `opensrc2026` | 팀별 키 (화면에서 입력, 기본값 `opensrc-team9`) |
+| `team` 필드 | 보냄 | 없음 (서버가 key 로 팀 판별) |
+| 검증용 `raw` / HMAC | 필요 | 불필요 |
+| 응답 `status` | - | `ok` / `out_of_range`(저장은 됨, `detail` 확인) |
+| 수집 현황 | `/sensor/opensrc/check/` | `/sensor/opensrc/teams/` |
+
+주변의 다른 팀 파이도 같은 0x181A 로 광고하므로, 화면의 **대상 장치 이름**
+(기본 `opensrc_team9`)과 이름이 같은 패킷만 서버로 보냅니다. 다른 장치의 패킷은
+CSV 에만 남고 `upload_result` 가 `skipped_other_device` 가 됩니다.
+대상 장치 이름을 비우면 0x181A 패킷을 모두 보냅니다.
 
 ## 구현된 기능
 
@@ -58,44 +74,51 @@ targetSdk 를 낮추면 백그라운드 수집 동작이 달라집니다.
 
 ## API 요청 / 응답
 
-요청 (PDF 21쪽)
+요청 (5주차 PDF 48쪽, `POST /sensor/opensrc/upload/`)
 
 ```json
 {
-  "key": "opensrc2026",
-  "team": "9",
-  "sensor": "environment_sensor",
-  "mac": "AA:BB:CC:DD:EE:FF",
-  "temp": 27.64,
-  "humidity": 51.71,
+  "key": "opensrc-team9",
+  "sensor": "team9sensor",
+  "mac": "B8:27:EB:2A:11:0F",
+  "temp": 29.35,
+  "humidity": 51.1,
   "AQI": 1,
-  "TVOC": 0,
-  "eCO2": 400,
-  "timestamp": 1784154027,
-  "lat": 36.6291,
-  "lon": 127.4565,
-  "sender": "abcd-1234-5679-11"
+  "TVOC": 63,
+  "eCO2": 483,
+  "timestamp": 1790742407,
+  "lat": 36.629011,
+  "lon": 127.457092,
+  "sender": "abcd-1234"
 }
 ```
 
-응답 (PDF 22쪽)
+응답 (5주차 PDF 49쪽)
 
 ```json
 {
   "result": "Success",
-  "message": "Data received from team TA successfully!",
-  "received_data": { "team": "team TA", "sensor": "sensor TA" }
+  "message": "Data received from Team9 successfully!",
+  "received_data": { "team": "Team9", "sensor": "team9sensor" },
+  "status": "ok"
 }
 ```
 
-전송한 데이터는 <http://203.255.81.72:10021/sensor/opensrc/check/> 에서 실시간으로 확인할 수 있습니다.
+| status | 의미 | 조치 |
+|---|---|---|
+| `ok` | 정상 | - |
+| `out_of_range` | 값이 물리적 범위를 벗어남 (저장은 됨) | `detail` 확인. 배선, 단위 변환, Pi 시계(NTP) 점검 |
+| (HTTP 400) | key 오류 또는 필수 값 누락 | `message` 확인. 앱이 `errorBody()` 로 읽어 로그에 표시 |
+
+전송한 데이터는 <http://203.255.81.72:10021/sensor/opensrc/teams/> 에서 실시간으로 확인할 수 있습니다.
+(접속이 안 되면 `203` 을 `10` 으로 바꿔서 접속)
 
 ## 실행 방법
 
 1. Android Studio에서 이 폴더를 엽니다.
 2. Gradle Sync 후 BLE를 지원하는 실제 Android 기기를 연결합니다.
 3. 앱을 실행하고 `주변 기기` 권한을 허용합니다. Android 13 이상에서는 수집 상태 표시용 알림 권한도 허용하는 것이 좋습니다.
-4. `서버 전송` 구역에서 **팀 번호**와 **센서 이름**을 입력합니다.
+4. `서버 전송` 구역에서 **팀별 API key**, **센서 이름**, **대상 장치 이름**을 확인합니다.
 5. `자동 전송` 을 켜고 전송 주기(초)를 정합니다. 위치 권한을 허용하면 `lat` / `lon` 이 함께 전송됩니다.
 6. `스캔 시작`을 누릅니다. 수신한 패킷이 설정한 주기마다 서버로 POST 됩니다.
 7. 이후 다른 앱을 사용하거나 화면을 꺼도 지속 알림이 표시되는 동안 BLE 수집과 서버 전송이 계속됩니다.
@@ -166,4 +189,4 @@ PDF의 실습 조건에 따라 데이터는 10분 이상 수집하는 것을 권
 ```
 
 - `SensorPacketTest` — 13바이트 little-endian 패킷 파싱
-- `PostDataTest` — PDF 21쪽 요청 양식 key 이름/값, 22쪽 응답 양식 파싱
+- `PostDataTest` — 5주차 PDF 48쪽 요청 양식(12개 필드), 49쪽 응답 status 파싱, 대상 장치 필터

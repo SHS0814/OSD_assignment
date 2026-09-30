@@ -8,37 +8,29 @@ import java.util.Locale;
 /**
  * 4주차 PDF 20쪽의 {@code postdata} 클래스에 해당한다.
  * JSON 형식으로 보낼 때에는 JSON 형식을 만들어 줘야 하므로,
- * PDF 21쪽 "요청 양식"의 key 이름을 {@link SerializedName} 으로 그대로 고정한다.
+ * 5주차 PDF 48쪽 "API 요청 양식"의 key 이름을 {@link SerializedName} 으로 그대로 고정한다.
  *
  * <pre>
  * {
- *   "key": "opensrc2026",
- *   "team": "team TA",
- *   "sensor": "sensor TA",
- *   "mac": "AA:BB:CC:DD:EE:FF",
- *   "temp": 11,
- *   "humidity": 22,
- *   "AQI": 33,
- *   "TVOC": 44,
- *   "eCO2": 55,
- *   "timestamp": 66,
- *   "lat": 7.7,
- *   "lon": 8.8,
- *   "sender": "abcd-1234-5679-11"
+ *   "key": "opensrc-team3",
+ *   "sensor": "team3sensor",
+ *   "mac": "DC:A6:32:11:22:33",
+ *   "temp": 24.1, "humidity": 48.0,
+ *   "AQI": 2, "TVOC": 90, "eCO2": 620,
+ *   "timestamp": 1790600000,
+ *   "lat": 36.62, "lon": 127.45,
+ *   "sender": "abcd-1234"
  * }
  * </pre>
+ *
+ * <p>4주차와 달라진 점(5주차 PDF 46쪽): key 는 공용 {@code opensrc2026} 대신 팀별 키이고,
+ * 서버가 key 로 팀을 구분하므로 {@code team} 필드가 없다. 센서가 팀 소유이므로
+ * 검증용 {@code raw} 도 보내지 않는다.
  */
 public final class PostData {
-    /** PDF 21쪽: 서버로 보낼 때 일치해야 하는 key. */
-    public static final String API_KEY = "opensrc2026";
-
     @Expose
     @SerializedName("key")
     private String key;
-
-    @Expose
-    @SerializedName("team")
-    private String team;
 
     @Expose
     @SerializedName("sensor")
@@ -84,27 +76,14 @@ public final class PostData {
     @SerializedName("sender")
     private String sender;
 
-    /**
-     * 0x181A ServiceData 원본 hex (센서 13바이트 + HMAC 태그).
-     *
-     * <p>PDF 21쪽 요청 양식에는 없지만 서버가 요구한다. 서버는 이 raw 를 다시 해석해
-     * 위 센서 값들과 대조하고, raw 안의 HMAC 태그를 mac 주소와 함께 검증한다.
-     * 이 필드가 없으면 서버가 {@code no_raw "raw 필드가 없습니다"} 로 거절한다.
-     */
-    @Expose
-    @SerializedName("raw")
-    private String raw;
-
     public PostData() {
     }
 
     /** PDF 20쪽 {@code set_data()} 에 대응하는 설정 메서드. */
-    public void set_data(String team, String sensor, String mac,
+    public void set_data(String key, String sensor, String mac,
                          double temp, double humidity, int aqi, int tvoc, int eco2,
-                         long timestamp, double lat, double lon, String sender,
-                         String raw) {
-        this.key = API_KEY;
-        this.team = team;
+                         long timestamp, double lat, double lon, String sender) {
+        this.key = key;
         this.sensor = sensor;
         this.mac = mac;
         this.temp = temp;
@@ -116,18 +95,17 @@ public final class PostData {
         this.lat = lat;
         this.lon = lon;
         this.sender = sender;
-        this.raw = raw;
     }
 
     /**
-     * 수집한 BLE 레코드 하나를 PDF 21쪽 요청 양식으로 변환한다.
+     * 수집한 BLE 레코드 하나를 5주차 PDF 48쪽 요청 양식으로 변환한다.
      *
-     * @param team   본인 팀 번호
+     * @param key    팀별로 발급된 API key
      * @param sensor 센서 이름 (비워 두면 BLE 광고의 장치 이름을 사용)
      * @param sender 스마트폰 UUID (Settings.Secure.ANDROID_ID)
      * @return 센서 패킷 파싱에 실패한 레코드면 {@code null}
      */
-    public static PostData from(BleRecord record, String team, String sensor, String sender) {
+    public static PostData from(BleRecord record, String key, String sensor, String sender) {
         SensorPacket packet = record.sensor;
         if (packet == null) {
             return null;
@@ -136,15 +114,15 @@ public final class PostData {
                 ? record.name
                 : sensor.trim();
         PostData body = new PostData();
-        body.set_data(team, sensorName, record.address,
+        body.set_data(key, sensorName, record.address,
                 round2(packet.temperature), round2(packet.humidity),
                 packet.aqi, packet.tvoc, packet.eco2, packet.timestamp,
-                record.latitude, record.longitude, sender, record.rawHex);
+                record.latitude, record.longitude, sender);
         return body;
     }
 
-    public String getTeam() {
-        return team;
+    public String getKey() {
+        return key;
     }
 
     public String getSensor() {
@@ -159,16 +137,11 @@ public final class PostData {
         return timestamp;
     }
 
-    public String getRaw() {
-        return raw;
-    }
-
     /** PDF 20쪽 {@code data_show()} 처럼 로그에 한 줄로 남기기 위한 요약. */
     public String summary() {
         return String.format(Locale.US,
-                "team=%s sensor=%s mac=%s temp=%.2f humidity=%.2f AQI=%d TVOC=%d eCO2=%d ts=%d lat=%.5f lon=%.5f",
-                team, sensor, mac, temp, humidity, AQI, TVOC, eCO2, timestamp, lat, lon)
-                + " raw=" + raw;
+                "key=%s sensor=%s mac=%s temp=%.2f humidity=%.2f AQI=%d TVOC=%d eCO2=%d ts=%d lat=%.5f lon=%.5f",
+                key, sensor, mac, temp, humidity, AQI, TVOC, eCO2, timestamp, lat, lon);
     }
 
     private static double round2(float value) {
