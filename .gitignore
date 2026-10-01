@@ -9,3 +9,9 @@ output/
 .codex-finalizer/
 app/src/test/
 app/src/androidTest/
+
+# 라즈베리 파이 센서: 측정 데이터와 캐시, 테스트는 올리지 않는다
+team9_sensor/data/
+__pycache__/
+*.pyc
+team9_sensor/tests/
