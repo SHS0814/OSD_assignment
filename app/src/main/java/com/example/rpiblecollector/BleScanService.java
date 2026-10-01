@@ -19,7 +19,9 @@ import android.bluetooth.le.ScanSettings;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.location.Location;
 import android.location.LocationManager;
+import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
@@ -31,12 +33,19 @@ import android.text.TextUtils;
 import android.util.Log;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -57,8 +66,9 @@ public final class BleScanService extends Service {
             "com.example.rpiblecollector.action.SAVE_CSV";
     public static final String ACTION_STOP_AND_SAVE =
             "com.example.rpiblecollector.action.STOP_AND_SAVE";
-    public static final String ACTION_UPLOAD_LATEST =
-            "com.example.rpiblecollector.action.UPLOAD_LATEST";
+    /** 장부의 대기 행을 지금 모두 보낸다. */
+    public static final String ACTION_SEND_PENDING =
+            "com.example.rpiblecollector.action.SEND_PENDING";
 
     public static final String LOG_TAG = "BleCollector";
     private static final String NOTIFICATION_CHANNEL_ID = "ble_collection";
@@ -68,6 +78,22 @@ public final class BleScanService extends Service {
     private static final ParcelUuid TARGET_UUID =
             ParcelUuid.fromString("0000181a-0000-1000-8000-00805f9b34fb");
     private static final long RECOMMENDED_COLLECTION_MILLIS = 10L * 60L * 1000L;
+    /** 요청 광고의 phone_time 을 갱신하는 주기. 파이는 15초간 변화가 없으면 요청이 끝난 것으로 본다. */
+    private static final long REQUEST_REFRESH_MILLIS = 2_000L;
+    /** 파이 광고가 이 시간 동안 안 보이면 요청 광고를 멈춘다. */
+    private static final long PI_LOST_MILLIS = 30_000L;
+    /** 큐 업로드 실패 후 다시 시도하기까지의 대기 시간. */
+    private static final long UPLOAD_RETRY_MILLIS = 30_000L;
+    /** 서버가 한 행을 거부했을 때 다음 시도까지의 간격. */
+    private static final long UPLOAD_REJECT_RETRY_MILLIS = 2_000L;
+    /** 서버가 연속으로 이만큼 거부하면 key 등 설정 문제로 보고 전송을 멈춘다. */
+    private static final int MAX_CONSECUTIVE_REJECTS = 5;
+    private static final String UPLOAD_QUEUED = "queued";
+
+    /** 장부 작업(가져오기·저장) 결과. 메인 스레드에서 호출된다. */
+    public interface ResultCallback {
+        void onResult(boolean success, String message);
+    }
 
     public interface Listener {
         void onStateChanged(ScanState state);
@@ -90,11 +116,14 @@ public final class BleScanService extends Service {
         public final int uploadSuccessCount;
         public final int uploadFailureCount;
         public final String lastServerMessage;
+        /** 과거 데이터 수집 현황 한 줄 요약. */
+        public final String backlogSummary;
 
         private ScanState(boolean scanning, boolean saving, long scanStartedAt,
                           long scanStoppedAt, int recordCount, int validPacketCount,
                           String failureMessage, int uploadSuccessCount,
-                          int uploadFailureCount, String lastServerMessage) {
+                          int uploadFailureCount, String lastServerMessage,
+                          String backlogSummary) {
             this.scanning = scanning;
             this.saving = saving;
             this.scanStartedAt = scanStartedAt;
@@ -105,6 +134,7 @@ public final class BleScanService extends Service {
             this.uploadSuccessCount = uploadSuccessCount;
             this.uploadFailureCount = uploadFailureCount;
             this.lastServerMessage = lastServerMessage;
+            this.backlogSummary = backlogSummary;
         }
 
         public long elapsedMillis(long now) {
@@ -147,8 +177,6 @@ public final class BleScanService extends Service {
     private String senderId;
     private int uploadSuccessCount;
     private int uploadFailureCount;
-    private long lastUploadElapsed;
-    private long lastUploadedSensorTimestamp = -1L;
     private String lastServerMessage;
     private boolean loggedPacketLayout;
     /** 필터를 걸지 않고 주변 광고를 전부 확인하는 진단 모드. */
@@ -157,6 +185,94 @@ public final class BleScanService extends Service {
     /** 필터를 통과했지만 0x181A ServiceData 가 없어 버린 광고 수. */
     private volatile int nonTargetCount;
 
+    // --- 과거 데이터 요청 (파이에 저장된 데이터를 굵은 간격부터 받아 온다) ---
+    private LocationTracker locationTracker;
+    private BacklogDb backlogDb;
+    private RequestAdvertiser requestAdvertiser;
+    /** 받은 샘플 timestamp (실시간 포함). BacklogDb 의 메모리 사본. */
+    private TreeSet<Long> haveTimestamps;
+    /** 파이가 "데이터 없음"이라고 답한 격자 시각. */
+    private Set<Long> gapTimestamps;
+    /** 파이 데이터가 처음 시작된 시각. 모르면 -1 (그동안은 want_ts=0 으로 요청). */
+    private long piOldestTs = -1L;
+    private byte[] piId;
+    private long lastPiSeenElapsed;
+    private boolean piLost;
+    /** 지금 요청 중인 시각. 요청하지 않으면 -1. */
+    private long currentWantTs = -1L;
+    private boolean queueUploadInFlight;
+    /** "지금 전송": 자동 전송이 꺼져 있어도 장부의 대기 행을 끝까지 보낸다. */
+    private boolean manualDrain;
+    private int consecutiveRejects;
+    /** 서버가 연속 거부해서 멈춘 상태. 설정을 바꾸거나 "지금 전송" 을 누르면 풀린다. */
+    private boolean queuePaused;
+    private String backlogSummary = "";
+
+    private final Runnable drainRunnable = this::drainUploadQueue;
+
+    private final Runnable backlogTicker = new Runnable() {
+        @Override
+        public void run() {
+            if (!scanning) {
+                return;
+            }
+            if (requestAdvertiser.isActive()
+                    && SystemClock.elapsedRealtime() - lastPiSeenElapsed > PI_LOST_MILLIS) {
+                piLost = true;
+                requestAdvertiser.stop();
+                currentWantTs = -1L;
+                addLog("파이 광고가 30초간 보이지 않아 과거 데이터 요청을 멈춥니다.");
+                updateBacklogSummary();
+                notifyStateChanged();
+            } else {
+                requestAdvertiser.refresh();
+            }
+            mainHandler.postDelayed(this, REQUEST_REFRESH_MILLIS);
+        }
+    };
+
+    /** 큐 업로드 결과. 공통 처리(카운트·로그)는 uploadCallback 에 맡긴다. */
+    private final SensorUploader.UploadCallback queueCallback =
+            new SensorUploader.UploadCallback() {
+                @Override
+                public void onUploadSuccess(PostData sent, PostResponse body) {
+                    // out_of_range 도 서버에 저장은 되므로 전송 완료로 본다.
+                    backlogDb.markUploaded(sent.getTimestamp(), System.currentTimeMillis(),
+                            body.status == null ? PostResponse.STATUS_OK : body.status);
+                    queueUploadInFlight = false;
+                    consecutiveRejects = 0;
+                    uploadCallback.onUploadSuccess(sent, body);
+                    drainUploadQueue();
+                }
+
+                @Override
+                public void onUploadFailure(PostData sent, String message, PostResponse response) {
+                    queueUploadInFlight = false;
+                    mainHandler.removeCallbacks(drainRunnable);
+                    if (response == null) {
+                        // 서버 응답이 없다(네트워크 끊김 등). 행 탓이 아니므로 시도 횟수는 세지 않고
+                        // 자동 전송이면 잠시 뒤 다시 보낸다. "지금 전송" 은 여기서 멈춘다.
+                        backlogDb.markFailed(sent.getTimestamp(), message, false);
+                        manualDrain = false;
+                        mainHandler.postDelayed(drainRunnable, UPLOAD_RETRY_MILLIS);
+                    } else {
+                        // 서버가 거부했다. 시도 횟수를 세고, MAX_ATTEMPTS 회가 되면 실패로 남긴다.
+                        backlogDb.markFailed(sent.getTimestamp(), message, true);
+                        consecutiveRejects++;
+                        if (consecutiveRejects >= MAX_CONSECUTIVE_REJECTS) {
+                            queuePaused = true;
+                            manualDrain = false;
+                            addLog("서버가 연속 " + consecutiveRejects + "번 거부해 전송을 멈춥니다. "
+                                    + "key·센서 이름을 확인한 뒤 '지금 전송' 을 누르세요.");
+                        } else {
+                            mainHandler.postDelayed(drainRunnable, UPLOAD_REJECT_RETRY_MILLIS);
+                        }
+                    }
+                    uploadCallback.onUploadFailure(sent, message, response);
+                    updateBacklogSummary();
+                }
+            };
+
     private final SensorUploader.UploadCallback uploadCallback =
             new SensorUploader.UploadCallback() {
                 @Override
@@ -164,8 +280,16 @@ public final class BleScanService extends Service {
                     uploadSuccessCount++;
                     lastServerMessage = body.summary();
                     addLog("HTTP 200 · " + lastServerMessage);
-                    notifyUploadDetail("  ✓ " + lastServerMessage);
-                    markUploadResult(sent, "success");
+                    // 5주차 PDF 49쪽: out_of_range 는 저장은 되지만 배선·단위 변환·Pi 시계를 점검해야 한다.
+                    if (body.isOutOfRange()) {
+                        addLog("경고: 서버가 값을 범위 이상(out_of_range)으로 표시했습니다. "
+                                + "detail 의 필드를 확인하세요 (배선, 단위 변환, Pi 시계 NTP).");
+                        notifyUploadDetail("  ⚠ " + lastServerMessage);
+                    } else {
+                        notifyUploadDetail("  ✓ " + lastServerMessage);
+                    }
+                    markUploadResult(sent, body.status == null
+                            ? "success" : "success(" + body.status + ")");
                     if (listener != null) {
                         listener.onUploadResult(true, lastServerMessage);
                     }
@@ -179,11 +303,8 @@ public final class BleScanService extends Service {
                     lastServerMessage = message;
                     addLog("전송 실패 · " + message);
                     notifyUploadDetail("  ✗ " + message);
-                    // 서버가 status 로 실패 원인을 구분해 준다: no_raw / bad_raw / bad_tag / value_mismatch.
-                    String resultTag = (response != null && response.status != null)
-                            ? "fail(" + response.status + "): " + message
-                            : "fail: " + message;
-                    markUploadResult(sent, resultTag);
+                    // HTTP 400 은 key 오류 또는 필수 값 누락이다. 원인은 message 에 담긴다.
+                    markUploadResult(sent, "fail: " + message);
                     if (listener != null) {
                         listener.onUploadResult(false, message);
                     }
@@ -224,6 +345,12 @@ public final class BleScanService extends Service {
         uploader = new SensorUploader();
         uploadConfig = UploadConfig.load(this);
         senderId = UploadConfig.senderId(this);
+        locationTracker = new LocationTracker(this);
+        backlogDb = new BacklogDb(this);
+        haveTimestamps = backlogDb.timestamps();
+        gapTimestamps = backlogDb.gaps();
+        piOldestTs = backlogDb.oldestTimestamp();
+        updateBacklogSummary();
         createNotificationChannel();
     }
 
@@ -244,8 +371,8 @@ public final class BleScanService extends Service {
         } else if (ACTION_STOP_AND_SAVE.equals(action)) {
             stopBleScan();
             saveCsv();
-        } else if (ACTION_UPLOAD_LATEST.equals(action)) {
-            uploadLatestRecord();
+        } else if (ACTION_SEND_PENDING.equals(action)) {
+            sendPendingNow();
         }
         return START_NOT_STICKY;
     }
@@ -265,7 +392,7 @@ public final class BleScanService extends Service {
     public ScanState getState() {
         return new ScanState(scanning, saving, scanStartedAt, scanStoppedAt,
                 collectedRecords.size(), validPacketCount, failureMessage,
-                uploadSuccessCount, uploadFailureCount, lastServerMessage);
+                uploadSuccessCount, uploadFailureCount, lastServerMessage, backlogSummary);
     }
 
     public List<BleRecord> getRecordsSnapshot() {
@@ -289,32 +416,185 @@ public final class BleScanService extends Service {
         return uploadConfig;
     }
 
-    /** Activity 에서 팀 번호·센서 이름·자동 전송 설정을 바꿀 때 호출한다. */
+    /** Activity 에서 key·대상 장치·자동 전송 설정을 바꿀 때 호출한다. */
     public void setUploadConfig(UploadConfig config) {
         boolean autoChanged = uploadConfig.autoUpload != config.autoUpload;
+        if (!config.apiKey.equals(uploadConfig.apiKey)
+                || !config.deviceName.equals(uploadConfig.deviceName)) {
+            queuePaused = false;
+            consecutiveRejects = 0;
+        }
         uploadConfig = config;
         config.save(this);
         if (autoChanged) {
             addLog(config.autoUpload
-                    ? "자동 전송 켜짐 · " + config.intervalSeconds + "초마다 POST "
+                    ? "자동 전송 켜짐 · 장부의 대기 행을 들어오는 대로 POST "
                             + SensorUploader.BASE_URL + SensorUploader.SEND_PATH
                     : "자동 전송 꺼짐.");
         }
+        drainUploadQueue();
         notifyStateChanged();
     }
 
-    /** 가장 최근에 파싱된 센서 패킷 하나를 즉시 서버로 보낸다(수동 전송). */
-    public void uploadLatestRecord() {
-        BleRecord latest = latestParsedRecord();
-        if (latest == null) {
-            String message = "전송할 센서 패킷이 없습니다.";
+    /** 장부에서 아직 전송되지 않은 행을 자동 전송 설정과 관계없이 지금 모두 보낸다. */
+    public void sendPendingNow() {
+        if (uploadConfig.apiKey.isEmpty()) {
+            addLog("전송 실패 · 팀별 key 를 입력해 주세요.");
+            if (listener != null) {
+                listener.onUploadResult(false, "key 없음");
+            }
+            return;
+        }
+        int pending = backlogDb.pendingCount();
+        if (pending == 0) {
+            String message = "장부에 전송할 데이터가 없습니다.";
             addLog(message);
             if (listener != null) {
                 listener.onUploadResult(false, message);
             }
             return;
         }
-        upload(latest);
+        addLog("지금 전송: 장부의 대기 " + pending + "건을 timestamp 순으로 보냅니다.");
+        queuePaused = false;
+        consecutiveRejects = 0;
+        manualDrain = true;
+        mainHandler.removeCallbacks(drainRunnable);
+        drainUploadQueue();
+        notifyStateChanged();
+    }
+
+    // --- 장부 관리 (관리 화면에서 호출) ---
+
+    public BacklogDb.Stats getLedgerStats() {
+        return backlogDb.stats();
+    }
+
+    public List<BacklogDb.Row> getLedgerRows(BacklogDb.Filter filter, int limit) {
+        return backlogDb.rows(filter, limit);
+    }
+
+    /** 서버가 거부해 실패로 남은 행을 대기로 되돌리고 다시 보낸다. */
+    public int retryFailedRows() {
+        int count = backlogDb.retryFailed();
+        if (count > 0) {
+            addLog("실패 " + count + "건을 대기로 되돌렸습니다.");
+            queuePaused = false;
+            consecutiveRejects = 0;
+            drainUploadQueue();
+        }
+        updateBacklogSummary();
+        notifyStateChanged();
+        return count;
+    }
+
+    /** 한 행을 대기로 되돌린다. 전송 완료였다면 서버로 한 번 더 간다. */
+    public void resetLedgerRow(long ts) {
+        backlogDb.resetToPending(ts);
+        addLog("장부 " + formatTs(ts) + " 을 대기로 되돌렸습니다.");
+        drainUploadQueue();
+        updateBacklogSummary();
+        notifyStateChanged();
+    }
+
+    /** "데이터 없음" 기록을 지워 그 시각을 파이에 다시 요청하게 한다. */
+    public void requestAgain(long ts) {
+        backlogDb.deleteNoData(ts);
+        gapTimestamps.remove(ts);
+        addLog("장부 " + formatTs(ts) + " 의 '데이터 없음' 을 지웠습니다. 다음 수집 때 다시 요청합니다.");
+        refreshBacklogRequest();
+        updateBacklogSummary();
+        notifyStateChanged();
+    }
+
+    /** 서버에 이미 있다는 것을 알 때 보내지 않고 전송 완료로만 표시한다. */
+    public void markLedgerRowUploaded(long ts) {
+        backlogDb.markUploadedManually(ts);
+        addLog("장부 " + formatTs(ts) + " 을 전송 완료로 표시했습니다.");
+        updateBacklogSummary();
+        notifyStateChanged();
+    }
+
+    /**
+     * 수집 CSV 나 장부 CSV 를 장부로 가져온다. 서버로 보내는 것은 가져온 뒤
+     * 장부의 전송 큐가 맡는다(자동 전송이 꺼져 있으면 "지금 전송").
+     */
+    public void importCsv(final Uri uri, final String name, final ResultCallback callback) {
+        final UploadConfig config = uploadConfig;
+        fileExecutor.execute(() -> {
+            String message;
+            boolean ok;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null) {
+                    throw new IOException("파일을 열 수 없습니다.");
+                }
+                LedgerCsv.ReadResult read = LedgerCsv.read(
+                        new InputStreamReader(in, StandardCharsets.UTF_8), config);
+                BacklogDb.ImportResult imported = backlogDb.importRows(read.entries);
+                ok = true;
+                message = String.format(Locale.getDefault(),
+                        "%s 가져오기 완료\n%s\n장부에 새로 추가: 대기 %,d · 전송 완료 %,d · "
+                                + "데이터 없음 %,d\n데이터 없음 → 실제 샘플 %,d · 전송 완료로 갱신 %,d · "
+                                + "이미 있음 %,d",
+                        name, read.summary(), imported.added, imported.addedUploaded,
+                        imported.addedNoData, imported.replacedNoData, imported.markedUploaded,
+                        imported.existing);
+            } catch (IOException | RuntimeException e) {
+                ok = false;
+                message = name + " 가져오기 실패: " + e.getMessage();
+            }
+            final boolean success = ok;
+            final String result = message;
+            mainHandler.post(() -> {
+                haveTimestamps = backlogDb.timestamps();
+                gapTimestamps = backlogDb.gaps();
+                addLog(result.replace('\n', ' '));
+                refreshBacklogRequest();
+                drainUploadQueue();
+                updateBacklogSummary();
+                notifyStateChanged();
+                callback.onResult(success, result);
+            });
+        });
+    }
+
+    /** 장부 전체를 앱 폴더의 ledger.csv 로 덮어쓴다(timestamp 순, 중복 없음). */
+    public void saveLedgerCsv(final ResultCallback callback) {
+        fileExecutor.execute(() -> {
+            String message;
+            boolean ok;
+            try {
+                List<BacklogDb.Row> rows = backlogDb.allRowsAscending();
+                List<LedgerCsv.Entry> entries = new ArrayList<>(rows.size());
+                for (BacklogDb.Row row : rows) {
+                    entries.add(row.toEntry());
+                }
+                File dir = getExternalFilesDir(null);
+                if (dir == null) {
+                    dir = getFilesDir();
+                }
+                File target = new File(dir, LedgerCsv.LEDGER_FILE_NAME);
+                File temp = new File(dir, LedgerCsv.LEDGER_FILE_NAME + ".tmp");
+                try (Writer writer = new OutputStreamWriter(
+                        new FileOutputStream(temp), StandardCharsets.UTF_8)) {
+                    LedgerCsv.write(writer, entries);
+                }
+                // 쓰는 도중 앱이 죽어도 이전 장부 파일이 깨지지 않게 다 쓴 뒤 바꿔 끼운다.
+                if (!temp.renameTo(target)) {
+                    throw new IOException("파일 이름을 바꿀 수 없습니다: " + target);
+                }
+                ok = true;
+                message = "장부 저장 완료 (" + entries.size() + "건)\n" + target.getAbsolutePath();
+            } catch (IOException | RuntimeException e) {
+                ok = false;
+                message = "장부 저장 실패: " + e.getMessage();
+            }
+            final boolean success = ok;
+            final String result = message;
+            mainHandler.post(() -> {
+                addLog(result.replace('\n', ' '));
+                callback.onResult(success, result);
+            });
+        });
     }
 
     @SuppressLint("MissingPermission")
@@ -327,6 +607,9 @@ public final class BleScanService extends Service {
         }
         scanning = false;
         scanStoppedAt = System.currentTimeMillis();
+        mainHandler.removeCallbacks(backlogTicker);
+        stopBacklogRequest();
+        locationTracker.stop();
         long elapsed = scanStoppedAt - scanStartedAt;
         addLog("BLE 스캔 중지.");
         if (nonTargetCount > 0) {
@@ -461,9 +744,21 @@ public final class BleScanService extends Service {
                         + "켜지 않으면 스캔이 시작돼도 광고 패킷이 올라오지 않습니다.");
             }
             if (uploadConfig.autoUpload) {
-                addLog("자동 전송 켜짐 · " + uploadConfig.intervalSeconds + "초마다 POST "
+                addLog("자동 전송 켜짐 · POST "
                         + SensorUploader.BASE_URL + SensorUploader.SEND_PATH);
             }
+            if (locationTracker.start()) {
+                addLog("GPS 위치 수신 시작 · lat/lon 은 패킷을 받은 순간의 폰 위치를 씁니다 "
+                        + "(위치를 못 얻으면 화면의 좌표).");
+            } else {
+                addLog("위치를 받을 수 없어 lat/lon 에 화면에서 입력한 좌표를 씁니다.");
+            }
+            if (requestAdvertiser == null) {
+                requestAdvertiser = new RequestAdvertiser(this, bluetoothAdapter, this::addLog);
+            }
+            piLost = false;
+            mainHandler.postDelayed(backlogTicker, REQUEST_REFRESH_MILLIS);
+            drainUploadQueue();
             updateForegroundNotification();
             notifyStateChanged();
         } catch (SecurityException e) {
@@ -473,8 +768,9 @@ public final class BleScanService extends Service {
 
     private void enqueueScanResult(ScanResult result) {
         long receivedAtMillis = System.currentTimeMillis();
-        double latitude = uploadConfig.latitude;
-        double longitude = uploadConfig.longitude;
+        Location location = locationTracker.current();
+        double latitude = location != null ? location.getLatitude() : uploadConfig.latitude;
+        double longitude = location != null ? location.getLongitude() : uploadConfig.longitude;
         try {
             recordExecutor.execute(() ->
                     processScanResult(result, receivedAtMillis, latitude, longitude));
@@ -566,7 +862,7 @@ public final class BleScanService extends Service {
         if (listener != null) {
             listener.onRecordReceived(record);
         }
-        maybeAutoUpload(record);
+        handleSensorRecord(record);
         long now = SystemClock.elapsedRealtime();
         if (now - lastNotificationUpdateElapsed >= NOTIFICATION_REFRESH_MILLIS) {
             updateForegroundNotification();
@@ -598,23 +894,143 @@ public final class BleScanService extends Service {
     }
 
     /**
-     * 자동 전송. 광고 패킷은 초당 여러 번 들어오므로 설정한 주기를 지키고,
-     * 같은 센서 timestamp 는 한 번만 보낸다.
+     * 우리 팀 파이의 패킷 처리. 실시간·과거 구분 없이 timestamp 가 처음이면 DB 에 저장하고
+     * 업로드 큐로 보낸다. 같은 timestamp 는 한 번만 저장되므로 서버에도 한 번만 올라간다.
      */
-    private void maybeAutoUpload(BleRecord record) {
-        if (!uploadConfig.autoUpload || record.sensor == null) {
+    private void handleSensorRecord(BleRecord record) {
+        if (record.sensor == null) {
             return;
         }
-        if (record.sensor.timestamp == lastUploadedSensorTimestamp) {
+        // 다른 팀 파이의 광고는 CSV 에만 남기고 우리 팀 key 로 보내지 않는다.
+        if (!uploadConfig.matchesDevice(record)) {
+            record.setUploadResult("skipped_other_device");
+            return;
+        }
+        onPiSeen(record.address);
+        SensorPacket packet = record.sensor;
+        if (packet.noData) {
+            // 파이에 이 시각 근처 데이터가 없다는 특수값. 다시 요청하지 않도록 장부에 남기지만
+            // 측정값이 아니므로 전송 큐에는 넣지 않는다(장부의 전송 대상 조건에서 빠진다).
+            record.setUploadResult("no_data_marker");
+            if (backlogDb.insertNoData(record)) {
+                gapTimestamps.add(packet.timestamp);
+                addLog("파이에 " + formatTs(packet.timestamp)
+                        + " 근처 데이터가 없음 → 장부에 기록, 서버로는 보내지 않습니다.");
+                refreshBacklogRequest();
+            }
+            return;
+        }
+        long nowSec = System.currentTimeMillis() / 1000L;
+        boolean past = packet.timestamp < nowSec - BacklogScheduler.LIVE_MARGIN_SECONDS;
+        if (currentWantTs == 0L && past
+                && (piOldestTs < 0L || packet.timestamp < piOldestTs)) {
+            // want_ts=0 요청에 대한 응답 = 파이에 있는 가장 오래된 샘플
+            piOldestTs = packet.timestamp;
+            backlogDb.setOldestTimestamp(piOldestTs);
+            addLog("파이 데이터 시작 시각: " + formatTs(piOldestTs));
+        }
+        if (!backlogDb.insert(record)) {
             record.setUploadResult("skipped_duplicate");
             return;
         }
-        long now = SystemClock.elapsedRealtime();
-        if (lastUploadElapsed != 0L && now - lastUploadElapsed < uploadConfig.intervalMillis()) {
-            record.setUploadResult("skipped_interval");
+        haveTimestamps.add(packet.timestamp);
+        // "데이터 없음" 이던 시각에 실제 샘플이 오면 장부에서 실제 샘플로 바뀐다.
+        gapTimestamps.remove(packet.timestamp);
+        record.setUploadResult(uploadConfig.autoUpload ? UPLOAD_QUEUED : "stored");
+        if (past) {
+            addLog("과거 데이터 수신: " + formatTs(packet.timestamp));
+        }
+        refreshBacklogRequest();
+        drainUploadQueue();
+    }
+
+    private void onPiSeen(String address) {
+        lastPiSeenElapsed = SystemClock.elapsedRealtime();
+        boolean firstSeen = piId == null;
+        if (firstSeen) {
+            piId = RequestAdvertiser.piIdFromAddress(address);
+        }
+        if (firstSeen || piLost) {
+            piLost = false;
+            refreshBacklogRequest();
+        }
+    }
+
+    /** 받은 데이터 기준으로 다음 요청을 계산해 요청 광고를 시작·갱신·중지한다. */
+    private void refreshBacklogRequest() {
+        if (!scanning || piId == null || requestAdvertiser == null || piLost) {
             return;
         }
-        upload(record);
+        long want = piOldestTs < 0L
+                ? 0L
+                : BacklogScheduler.nextRequest(piOldestTs,
+                        System.currentTimeMillis() / 1000L, haveTimestamps, gapTimestamps);
+        if (want < 0L) {
+            if (currentWantTs >= 0L) {
+                addLog("파이의 과거 데이터를 모두 받았습니다.");
+            }
+            stopBacklogRequest();
+            return;
+        }
+        if (want != currentWantTs) {
+            currentWantTs = want;
+            addLog("과거 데이터 요청: " + (want == 0L ? "가장 오래된 샘플" : formatTs(want)));
+        }
+        requestAdvertiser.request(piId, want);
+        updateBacklogSummary();
+    }
+
+    private void stopBacklogRequest() {
+        if (requestAdvertiser != null) {
+            requestAdvertiser.stop();
+        }
+        currentWantTs = -1L;
+        updateBacklogSummary();
+    }
+
+    /**
+     * 장부의 미전송 행을 timestamp 순서대로 한 건씩 보낸다. 응답이 오면 다음 건을 보낸다.
+     * 서버로 가는 경로는 이것 하나뿐이라 같은 timestamp 가 두 번 가지 않는다.
+     */
+    private void drainUploadQueue() {
+        if (queueUploadInFlight || queuePaused || uploadConfig.apiKey.isEmpty()
+                || !(uploadConfig.autoUpload || manualDrain)) {
+            return;
+        }
+        BacklogDb.Row row = backlogDb.nextPending();
+        if (row == null) {
+            if (manualDrain) {
+                manualDrain = false;
+                addLog("장부의 대기 데이터를 모두 보냈습니다.");
+            }
+            updateBacklogSummary();
+            notifyStateChanged();
+            return;
+        }
+        // sensor = 대상 장치 이름. 행마다 저장된 이름을 쓰면 광고 이름을 바꾸기 전 행
+        // (opensrc_team9)과 후 행(Opensrc_team9)이 서버에서 다른 센서로 갈린다.
+        String sensorName = uploadConfig.sensorName(row.name);
+        queueUploadInFlight = true;
+        PostData body = uploader.send(row, uploadConfig.apiKey, sensorName, senderId,
+                queueCallback);
+        addLog("POST " + SensorUploader.SEND_PATH + " · " + body.summary());
+    }
+
+    private void updateBacklogSummary() {
+        String request;
+        if (currentWantTs < 0L) {
+            request = "요청 없음";
+        } else if (currentWantTs == 0L) {
+            request = "파이 데이터 시작 시각 확인 중";
+        } else {
+            long step = BacklogScheduler.levelOf(
+                    BacklogScheduler.dayStart(piOldestTs), currentWantTs);
+            request = "요청 " + formatTs(currentWantTs) + " (" + formatStep(step) + " 간격)";
+        }
+        backlogSummary = String.format(Locale.getDefault(),
+                "장부 %,d건 · 전송 대기 %,d건%s · %s",
+                haveTimestamps.size(), backlogDb.pendingCount(),
+                queuePaused ? " (전송 멈춤)" : "", request);
     }
 
     private void notifyUploadDetail(String line) {
@@ -623,43 +1039,18 @@ public final class BleScanService extends Service {
         }
     }
 
-    /** PDF 21쪽 "데이터 전송 코드" 호출 지점. */
-    private void upload(BleRecord record) {
-        PostData body = PostData.from(record, uploadConfig.team, uploadConfig.sensor, senderId);
-        if (body == null) {
-            addLog("전송 실패 · 센서 패킷을 파싱하지 못한 레코드입니다.");
-            if (listener != null) {
-                listener.onUploadResult(false, "센서 패킷 파싱 불가");
-            }
-            return;
-        }
-        lastUploadElapsed = SystemClock.elapsedRealtime();
-        lastUploadedSensorTimestamp = record.sensor.timestamp;
-        record.setUploadResult("sending");
-        addLog("POST " + SensorUploader.SEND_PATH + " · " + body.summary());
-        uploader.send(body, uploadCallback);
-    }
-
     /** 전송 결과를 해당 레코드에 되돌려 기록해 CSV 에 남긴다. */
     private void markUploadResult(PostData sent, String result) {
         for (int i = collectedRecords.size() - 1; i >= 0; i--) {
             BleRecord record = collectedRecords.get(i);
             if (record.sensor != null
                     && record.sensor.timestamp == sent.getTimestamp()
-                    && "sending".equals(record.getUploadResult())) {
+                    && (UPLOAD_QUEUED.equals(record.getUploadResult())
+                    || "stored".equals(record.getUploadResult()))) {
                 record.setUploadResult(result);
                 return;
             }
         }
-    }
-
-    private BleRecord latestParsedRecord() {
-        for (int i = collectedRecords.size() - 1; i >= 0; i--) {
-            if (collectedRecords.get(i).sensor != null) {
-                return collectedRecords.get(i);
-            }
-        }
-        return null;
     }
 
     private boolean hasBlePermissions() {
@@ -667,6 +1058,8 @@ public final class BleScanService extends Service {
             return checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
                     == PackageManager.PERMISSION_GRANTED
                     && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                    == PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
                     == PackageManager.PERMISSION_GRANTED;
         }
         return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -758,8 +1151,12 @@ public final class BleScanService extends Service {
     private void ensureForeground(String text) {
         Notification notification = buildNotification(text);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+            int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
+            if (locationTracker.hasPermission()) {
+                // 화면이 꺼져도 위치를 받으려면 location 유형이 필요하다.
+                type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+            }
+            startForeground(NOTIFICATION_ID, notification, type);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
@@ -835,6 +1232,15 @@ public final class BleScanService extends Service {
         stopSelf();
     }
 
+    private static String formatTs(long unixSeconds) {
+        return new SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
+                .format(new Date(unixSeconds * 1000L));
+    }
+
+    private static String formatStep(long seconds) {
+        return seconds >= 3_600L ? (seconds / 3_600L) + "시간" : (seconds / 60L) + "분";
+    }
+
     private static String formatElapsed(long millis) {
         long totalSeconds = Math.max(0L, millis) / 1000L;
         return String.format(Locale.getDefault(), "%02d:%02d",
@@ -863,8 +1269,13 @@ public final class BleScanService extends Service {
             bluetoothLeScanner.stopScan(scanCallback);
         }
         scanning = false;
+        mainHandler.removeCallbacks(backlogTicker);
+        mainHandler.removeCallbacks(drainRunnable);
+        stopBacklogRequest();
+        locationTracker.stop();
         recordExecutor.shutdown();
         fileExecutor.shutdown();
+        backlogDb.close();
         super.onDestroy();
     }
 }

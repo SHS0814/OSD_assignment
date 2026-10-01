@@ -3,6 +3,7 @@ package com.example.rpiblecollector;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothManager;
 import android.content.ActivityNotFoundException;
@@ -11,12 +12,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.provider.OpenableColumns;
 import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
@@ -32,6 +35,8 @@ import android.widget.Toast;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
@@ -39,6 +44,7 @@ public class MainActivity extends Activity {
     private static final int PERMISSION_REQUEST_CODE = 100;
     private static final int ENABLE_BLUETOOTH_REQUEST_CODE = 101;
     private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 102;
+    private static final int PICK_CSV_REQUEST_CODE = 103;
     private static final int MAX_VISIBLE_ROWS = 100;
     private static final String PREFS_NAME = "collector_preferences";
     private static final String PREF_NOTIFICATION_PERMISSION_ASKED =
@@ -60,6 +66,7 @@ public class MainActivity extends Activity {
     private int uploadSuccessCount;
     private int uploadFailureCount;
     private String lastServerMessage;
+    private String backlogSummary;
     /** 화면 값을 서비스 설정으로 되돌려 쓰는 동안에는 TextWatcher 를 무시한다. */
     private boolean applyingConfig;
 
@@ -71,11 +78,9 @@ public class MainActivity extends Activity {
     private Button startButton;
     private Button stopButton;
     private Button saveButton;
-    private Button uploadButton;
     private Button checkPageButton;
-    private EditText teamInput;
-    private EditText sensorInput;
-    private EditText intervalInput;
+    private EditText keyInput;
+    private EditText deviceNameInput;
     private EditText latInput;
     private EditText lonInput;
     private CheckBox autoUploadCheck;
@@ -87,6 +92,28 @@ public class MainActivity extends Activity {
     private TextView tabCollect;
     private TextView tabSend;
     private ArrayAdapter<String> scanListAdapter;
+
+    // --- 장부 관리 화면 ---
+    private static final int LEDGER_ROW_LIMIT = 500;
+    private static final long LEDGER_REFRESH_DELAY_MILLIS = 500L;
+    private View pageLedger;
+    private TextView tabLedger;
+    private TextView ledgerSummaryText;
+    private Button ledgerSendButton;
+    private Button ledgerRetryButton;
+    private Button ledgerImportButton;
+    private Button ledgerSaveButton;
+    private TextView[] ledgerFilterViews;
+    private BacklogDb.Filter ledgerFilter = BacklogDb.Filter.ALL;
+    private final List<BacklogDb.Row> ledgerRows = new ArrayList<>();
+    private final List<String> ledgerRowTexts = new ArrayList<>();
+    private ArrayAdapter<String> ledgerAdapter;
+    private boolean ledgerRefreshPosted;
+
+    private final Runnable ledgerRefresher = () -> {
+        ledgerRefreshPosted = false;
+        refreshLedger();
+    };
 
     private final Runnable elapsedTicker = new Runnable() {
         @Override
@@ -186,12 +213,10 @@ public class MainActivity extends Activity {
         startButton = findViewById(R.id.startButton);
         stopButton = findViewById(R.id.stopButton);
         saveButton = findViewById(R.id.saveButton);
-        uploadButton = findViewById(R.id.uploadButton);
         checkPageButton = findViewById(R.id.checkPageButton);
         uploadStatusText = findViewById(R.id.uploadStatusText);
-        teamInput = findViewById(R.id.teamInput);
-        sensorInput = findViewById(R.id.sensorInput);
-        intervalInput = findViewById(R.id.intervalInput);
+        keyInput = findViewById(R.id.keyInput);
+        deviceNameInput = findViewById(R.id.deviceNameInput);
         latInput = findViewById(R.id.latInput);
         lonInput = findViewById(R.id.lonInput);
         autoUploadCheck = findViewById(R.id.autoUploadCheck);
@@ -203,6 +228,25 @@ public class MainActivity extends Activity {
         tabCollect = findViewById(R.id.tabCollect);
         tabSend = findViewById(R.id.tabSend);
         ListView scanList = findViewById(R.id.scanList);
+        pageLedger = findViewById(R.id.pageLedger);
+        tabLedger = findViewById(R.id.tabLedger);
+        ledgerSummaryText = findViewById(R.id.ledgerSummaryText);
+        ledgerSendButton = findViewById(R.id.ledgerSendButton);
+        ledgerRetryButton = findViewById(R.id.ledgerRetryButton);
+        ledgerImportButton = findViewById(R.id.ledgerImportButton);
+        ledgerSaveButton = findViewById(R.id.ledgerSaveButton);
+        ledgerFilterViews = new TextView[]{
+                findViewById(R.id.ledgerFilterAll),
+                findViewById(R.id.ledgerFilterPending),
+                findViewById(R.id.ledgerFilterFailed),
+                findViewById(R.id.ledgerFilterUploaded),
+                findViewById(R.id.ledgerFilterNoData)
+        };
+        ListView ledgerList = findViewById(R.id.ledgerList);
+        ledgerAdapter = new ArrayAdapter<>(this, R.layout.item_ledger_row, ledgerRowTexts);
+        ledgerList.setAdapter(ledgerAdapter);
+        ledgerList.setOnItemClickListener((parent, view, position, id) ->
+                showLedgerRowDialog(position));
 
         scanListAdapter = new ArrayAdapter<>(this,
                 android.R.layout.simple_list_item_1, visibleRows);
@@ -214,16 +258,27 @@ public class MainActivity extends Activity {
         startButton.setOnClickListener(v -> prepareAndStartScan());
         stopButton.setOnClickListener(v -> stopBleScan());
         saveButton.setOnClickListener(v -> saveCsv());
-        uploadButton.setOnClickListener(v -> uploadLatest());
         checkPageButton.setOnClickListener(v -> openCheckPage());
-        tabCollect.setOnClickListener(v -> showPage(true));
-        tabSend.setOnClickListener(v -> showPage(false));
-        showPage(true);
+        tabCollect.setOnClickListener(v -> showPage(PAGE_COLLECT));
+        tabSend.setOnClickListener(v -> showPage(PAGE_SEND));
+        tabLedger.setOnClickListener(v -> showPage(PAGE_LEDGER));
+        ledgerSendButton.setOnClickListener(v -> sendPending());
+        ledgerRetryButton.setOnClickListener(v -> retryFailed());
+        ledgerImportButton.setOnClickListener(v -> showCsvPicker());
+        ledgerSaveButton.setOnClickListener(v -> saveLedger());
+        BacklogDb.Filter[] filters = BacklogDb.Filter.values();
+        for (int i = 0; i < ledgerFilterViews.length; i++) {
+            final BacklogDb.Filter filter = filters[i];
+            ledgerFilterViews[i].setOnClickListener(v -> {
+                ledgerFilter = filter;
+                refreshLedger();
+            });
+        }
+        showPage(PAGE_COLLECT);
 
         applyUploadConfig(UploadConfig.load(this));
-        teamInput.addTextChangedListener(configWatcher);
-        sensorInput.addTextChangedListener(configWatcher);
-        intervalInput.addTextChangedListener(configWatcher);
+        keyInput.addTextChangedListener(configWatcher);
+        deviceNameInput.addTextChangedListener(configWatcher);
         latInput.addTextChangedListener(configWatcher);
         lonInput.addTextChangedListener(configWatcher);
         autoUploadCheck.setOnCheckedChangeListener((v, checked) -> {
@@ -300,6 +355,10 @@ public class MainActivity extends Activity {
             return checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
                     == PackageManager.PERMISSION_GRANTED
                     && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                    == PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
+                    == PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
                     == PackageManager.PERMISSION_GRANTED;
         }
         return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -308,13 +367,20 @@ public class MainActivity extends Activity {
 
     private void requestBlePermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // ADVERTISE: 파이에 과거 데이터를 요청하는 광고용
+            // FINE/COARSE: 전송할 lat / lon (Android 12 부터는 둘을 같이 요청해야 한다)
             requestPermissions(new String[]{
                     Manifest.permission.BLUETOOTH_SCAN,
-                    Manifest.permission.BLUETOOTH_CONNECT
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.BLUETOOTH_ADVERTISE,
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
             }, PERMISSION_REQUEST_CODE);
         } else {
-            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
-                    PERMISSION_REQUEST_CODE);
+            requestPermissions(new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+            }, PERMISSION_REQUEST_CODE);
         }
     }
 
@@ -330,16 +396,13 @@ public class MainActivity extends Activity {
                                            int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == PERMISSION_REQUEST_CODE) {
-            boolean granted = grantResults.length > 0;
-            for (int result : grantResults) {
-                granted &= result == PackageManager.PERMISSION_GRANTED;
-            }
-            if (granted) {
+            // "대략적인 위치"만 허용해도 COARSE 결과 하나만 거부되므로 필요한 권한을 다시 확인한다.
+            if (hasBlePermissions()) {
                 appendLocalLog("BLE 권한 승인 완료.");
                 prepareAndStartScan();
             } else {
-                appendLocalLog("BLE 권한이 거부되어 스캔할 수 없습니다.");
-                Toast.makeText(this, "주변 기기 권한을 허용해 주세요.",
+                appendLocalLog("BLE·위치 권한이 거부되어 스캔할 수 없습니다.");
+                Toast.makeText(this, "주변 기기와 정확한 위치 권한을 허용해 주세요.",
                         Toast.LENGTH_LONG).show();
             }
         } else if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
@@ -354,7 +417,12 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == ENABLE_BLUETOOTH_REQUEST_CODE) {
+        if (requestCode == PICK_CSV_REQUEST_CODE) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                Uri uri = data.getData();
+                importCsv(uri, displayName(uri));
+            }
+        } else if (requestCode == ENABLE_BLUETOOTH_REQUEST_CODE) {
             if (resultCode == RESULT_OK) {
                 appendLocalLog("Bluetooth가 활성화되었습니다.");
                 prepareAndStartScan();
@@ -399,27 +467,280 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** PDF 21쪽 API 로 최근 센서 패킷 1건을 즉시 POST 한다. */
-    private void uploadLatest() {
-        if (TextUtils.isEmpty(teamInput.getText().toString().trim())) {
-            Toast.makeText(this, "팀 번호를 입력해 주세요.", Toast.LENGTH_SHORT).show();
+    /** 장부에서 아직 전송되지 않은 행을 5주차 PDF 48쪽 API 로 지금 모두 POST 한다. */
+    private void sendPending() {
+        if (TextUtils.isEmpty(keyInput.getText().toString().trim())) {
+            Toast.makeText(this, "팀별 API key 를 입력해 주세요.", Toast.LENGTH_SHORT).show();
             return;
         }
         pushUploadConfig();
         if (serviceBound) {
-            scanService.uploadLatestRecord();
+            scanService.sendPendingNow();
         } else {
             startService(new Intent(this, BleScanService.class)
-                    .setAction(BleScanService.ACTION_UPLOAD_LATEST));
+                    .setAction(BleScanService.ACTION_SEND_PENDING));
         }
     }
 
+    /**
+     * 앱 폴더(CSV 저장 위치)의 CSV 를 최신순으로 보여 준다. Android 11 부터는 시스템 파일
+     * 선택기에서 Android/data 폴더가 보이지 않으므로 앱 폴더는 직접 나열하고,
+     * 다른 곳으로 옮긴 파일은 "다른 위치…" 로 고른다.
+     */
+    private void showCsvPicker() {
+        File dir = getExternalFilesDir(null);
+        if (dir == null) {
+            dir = getFilesDir();
+        }
+        File[] found = dir.listFiles((d, name) -> name.toLowerCase(Locale.US).endsWith(".csv"));
+        final List<File> files = found == null
+                ? new ArrayList<>() : new ArrayList<>(Arrays.asList(found));
+        Collections.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+
+        String[] labels = new String[files.size()];
+        for (int i = 0; i < files.size(); i++) {
+            File f = files.get(i);
+            labels[i] = String.format(Locale.getDefault(), "%s  (%,d KB)",
+                    f.getName(), Math.max(1L, f.length() / 1024L));
+        }
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle(R.string.csv_pick_title)
+                .setNeutralButton(R.string.csv_pick_other, (d, w) -> openDocumentPicker())
+                .setNegativeButton(R.string.cancel, null);
+        if (files.isEmpty()) {
+            builder.setMessage(R.string.csv_no_files);
+        } else {
+            builder.setItems(labels, (d, which) -> {
+                File f = files.get(which);
+                importCsv(Uri.fromFile(f), f.getName());
+            });
+        }
+        builder.show();
+    }
+
+    private void openDocumentPicker() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*")
+                .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                        "text/csv", "text/comma-separated-values", "text/plain",
+                        "application/csv", "application/octet-stream"})
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, PICK_CSV_REQUEST_CODE);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "파일 선택기를 열 수 없습니다.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private String displayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri,
+                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) {
+                return c.getString(0);
+            }
+        } catch (RuntimeException ignored) {
+            // 이름을 못 얻으면 URI 의 마지막 부분을 쓴다.
+        }
+        String last = uri.getLastPathSegment();
+        return last == null ? uri.toString() : last;
+    }
+
+    /** 수집 CSV·장부 CSV 를 장부로 가져온다. 서버 전송은 장부의 전송 큐가 맡는다. */
+    private void importCsv(Uri uri, String name) {
+        if (!serviceBound) {
+            Toast.makeText(this, "잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        pushUploadConfig();
+        ledgerImportButton.setEnabled(false);
+        ledgerSummaryText.setText(getString(R.string.csv_loading, name));
+        scanService.importCsv(uri, name, (success, message) -> {
+            if (isDestroyed()) {
+                return;
+            }
+            ledgerImportButton.setEnabled(true);
+            refreshLedger();
+            new AlertDialog.Builder(this)
+                    .setTitle(success ? R.string.ledger_import_done : R.string.ledger_import_failed)
+                    .setMessage(message + (success && !autoUploadCheck.isChecked()
+                            ? "\n\n자동 전송이 꺼져 있습니다. '지금 전송' 을 누르면 대기 행을 보냅니다."
+                            : ""))
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show();
+        });
+    }
+
+    private void saveLedger() {
+        if (!serviceBound) {
+            return;
+        }
+        ledgerSaveButton.setEnabled(false);
+        scanService.saveLedgerCsv((success, message) -> {
+            if (isDestroyed()) {
+                return;
+            }
+            ledgerSaveButton.setEnabled(true);
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+        });
+    }
+
+    private void retryFailed() {
+        if (!serviceBound) {
+            return;
+        }
+        pushUploadConfig();
+        int count = scanService.retryFailedRows();
+        Toast.makeText(this, count == 0 ? "실패한 행이 없습니다." : "실패 " + count + "건을 대기로 되돌렸습니다.",
+                Toast.LENGTH_SHORT).show();
+    }
+
+    /** 장부 행을 누르면 자세한 내용과 관리 동작을 보여 준다. */
+    private void showLedgerRowDialog(int position) {
+        if (position < 0 || position >= ledgerRows.size() || !serviceBound) {
+            return;
+        }
+        final BacklogDb.Row row = ledgerRows.get(position);
+        if (row.noData) {
+            new AlertDialog.Builder(this)
+                    .setTitle(R.string.ledger_row_title)
+                    .setMessage(LedgerCsv.formatKst(row.timestamp * 1000L) + " (KST)\n\n"
+                            + getString(R.string.ledger_no_data_detail))
+                    .setNeutralButton(R.string.ledger_request_again,
+                            (d, w) -> scanService.requestAgain(row.timestamp))
+                    .setNegativeButton(R.string.cancel, null)
+                    .show();
+            return;
+        }
+        StringBuilder detail = new StringBuilder()
+                .append("timestamp ").append(row.timestamp).append('\n')
+                .append(LedgerCsv.formatKst(row.timestamp * 1000L)).append(" (KST)\n\n")
+                .append(String.format(Locale.getDefault(),
+                        "온도 %.2f°C · 습도 %.2f%%\nAQI %d · TVOC %d ppb · eCO2 %d ppm\n",
+                        row.temp, row.humidity, row.aqi, row.tvoc, row.eco2))
+                .append(String.format(Locale.US, "lat %.6f · lon %.6f\n", row.lat, row.lon))
+                .append(row.name).append(" · ").append(row.mac).append('\n')
+                .append("출처 ").append(row.source).append(" · 수신 ")
+                .append(LedgerCsv.formatKst(row.receivedAt)).append("\n\n")
+                .append("상태 ").append(statusLabel(row));
+        if (row.uploadedAt > 0L) {
+            detail.append("\n전송 ").append(LedgerCsv.formatKst(row.uploadedAt));
+        }
+        if (row.attempts > 0) {
+            detail.append("\n서버 거부 ").append(row.attempts).append("회");
+        }
+        if (!TextUtils.isEmpty(row.lastError)) {
+            detail.append("\n마지막 오류: ").append(row.lastError);
+        }
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle(R.string.ledger_row_title)
+                .setMessage(detail.toString())
+                .setNegativeButton(R.string.cancel, null);
+        if (row.uploaded) {
+            builder.setNeutralButton(R.string.ledger_resend, (d, w) -> confirmResend(row));
+        } else {
+            builder.setNeutralButton(R.string.ledger_mark_uploaded,
+                    (d, w) -> scanService.markLedgerRowUploaded(row.timestamp));
+            if (BacklogDb.STATUS_FAILED.equals(row.status())) {
+                builder.setPositiveButton(R.string.ledger_retry_one,
+                        (d, w) -> scanService.resetLedgerRow(row.timestamp));
+            }
+        }
+        builder.show();
+    }
+
+    private void confirmResend(BacklogDb.Row row) {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.ledger_resend)
+                .setMessage(R.string.ledger_resend_warning)
+                .setPositiveButton(R.string.ledger_resend,
+                        (d, w) -> scanService.resetLedgerRow(row.timestamp))
+                .setNegativeButton(R.string.cancel, null)
+                .show();
+    }
+
+    /** 서비스 상태가 바뀔 때마다 부르지만, 장부 화면이 보일 때만 0.5초에 한 번 다시 읽는다. */
+    private void scheduleLedgerRefresh() {
+        if (pageLedger.getVisibility() != View.VISIBLE || ledgerRefreshPosted) {
+            return;
+        }
+        ledgerRefreshPosted = true;
+        handler.postDelayed(ledgerRefresher, LEDGER_REFRESH_DELAY_MILLIS);
+    }
+
+    private void refreshLedger() {
+        BacklogDb.Filter[] filters = BacklogDb.Filter.values();
+        for (int i = 0; i < ledgerFilterViews.length; i++) {
+            boolean selected = filters[i] == ledgerFilter;
+            ledgerFilterViews[i].setTextColor(getColor(selected ? R.color.blue : R.color.text_secondary));
+            ledgerFilterViews[i].setTypeface(null,
+                    selected ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+        }
+        if (!serviceBound) {
+            return;
+        }
+        BacklogDb.Stats stats = scanService.getLedgerStats();
+        String range = stats.total == 0 ? "비어 있음"
+                : LedgerCsv.formatKst(stats.firstTs * 1000L).substring(5, 16) + " ~ "
+                + LedgerCsv.formatKst(stats.lastTs * 1000L).substring(5, 16);
+        String lastSent = stats.lastUploadedAt > 0L
+                ? LedgerCsv.formatKst(stats.lastUploadedAt).substring(5) : "없음";
+        ledgerSummaryText.setText(getString(R.string.ledger_summary_format,
+                stats.total, stats.uploaded, stats.pending, stats.failed, stats.noData,
+                range, lastSent));
+        ledgerRetryButton.setEnabled(stats.failed > 0);
+        ledgerSendButton.setEnabled(stats.pending > 0);
+
+        ledgerRows.clear();
+        ledgerRows.addAll(scanService.getLedgerRows(ledgerFilter, LEDGER_ROW_LIMIT));
+        ledgerRowTexts.clear();
+        for (BacklogDb.Row row : ledgerRows) {
+            ledgerRowTexts.add(formatLedgerRow(row));
+        }
+        ledgerAdapter.notifyDataSetChanged();
+    }
+
+    private String formatLedgerRow(BacklogDb.Row row) {
+        if (row.noData) {
+            return LedgerCsv.formatKst(row.timestamp * 1000L).substring(5) + "   "
+                    + statusLabel(row) + "\n파이에 이 시각 근처 데이터 없음 · 서버로 보내지 않음";
+        }
+        String line2 = String.format(Locale.getDefault(),
+                "%.2f°C · %.1f%% · AQI %d · TVOC %d · eCO2 %d",
+                row.temp, row.humidity, row.aqi, row.tvoc, row.eco2);
+        return LedgerCsv.formatKst(row.timestamp * 1000L).substring(5) + "   "
+                + statusLabel(row) + "\n" + line2;
+    }
+
+    private static String statusLabel(BacklogDb.Row row) {
+        switch (row.status()) {
+            case BacklogDb.STATUS_UPLOADED:
+                return "✓ 전송 완료" + (row.serverStatus == null ? "" : "(" + row.serverStatus + ")");
+            case BacklogDb.STATUS_FAILED:
+                return "✗ 실패";
+            case BacklogDb.STATUS_NO_DATA:
+                return "– 데이터 없음";
+            default:
+                return TextUtils.isEmpty(row.lastError) ? "· 대기" : "· 대기(재시도)";
+        }
+    }
+
+    private static final int PAGE_COLLECT = 0;
+    private static final int PAGE_SEND = 1;
+    private static final int PAGE_LEDGER = 2;
+
     /** 하단 탭 전환. 앱을 열면 수집 페이지가 먼저 보인다. */
-    private void showPage(boolean collect) {
-        pageCollect.setVisibility(collect ? View.VISIBLE : View.GONE);
-        pageSend.setVisibility(collect ? View.GONE : View.VISIBLE);
-        tabCollect.setTextColor(getColor(collect ? R.color.blue : R.color.text_secondary));
-        tabSend.setTextColor(getColor(collect ? R.color.text_secondary : R.color.blue));
+    private void showPage(int page) {
+        pageCollect.setVisibility(page == PAGE_COLLECT ? View.VISIBLE : View.GONE);
+        pageSend.setVisibility(page == PAGE_SEND ? View.VISIBLE : View.GONE);
+        pageLedger.setVisibility(page == PAGE_LEDGER ? View.VISIBLE : View.GONE);
+        tabCollect.setTextColor(getColor(page == PAGE_COLLECT ? R.color.blue : R.color.text_secondary));
+        tabSend.setTextColor(getColor(page == PAGE_SEND ? R.color.blue : R.color.text_secondary));
+        tabLedger.setTextColor(getColor(page == PAGE_LEDGER ? R.color.blue : R.color.text_secondary));
+        if (page == PAGE_LEDGER) {
+            refreshLedger();
+        }
     }
 
     private void appendSendLog(String line) {
@@ -427,7 +748,7 @@ public class MainActivity extends Activity {
         sendLogScroll.post(() -> sendLogScroll.fullScroll(View.FOCUS_DOWN));
     }
 
-    /** PDF 26쪽: 수집한 데이터 실시간 확인 페이지를 브라우저로 연다. */
+    /** 5주차 PDF 50쪽: 팀별 수집 현황 페이지를 브라우저로 연다. */
     private void openCheckPage() {
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(SensorUploader.CHECK_URL)));
@@ -438,9 +759,8 @@ public class MainActivity extends Activity {
 
     private void applyUploadConfig(UploadConfig config) {
         applyingConfig = true;
-        teamInput.setText(config.team);
-        sensorInput.setText(config.sensor);
-        intervalInput.setText(String.valueOf(config.intervalSeconds));
+        keyInput.setText(config.apiKey);
+        deviceNameInput.setText(config.deviceName);
         latInput.setText(formatCoordinate(config.latitude));
         lonInput.setText(formatCoordinate(config.longitude));
         autoUploadCheck.setChecked(config.autoUpload);
@@ -460,20 +780,10 @@ public class MainActivity extends Activity {
     }
 
     private UploadConfig readUploadConfig() {
-        int interval = UploadConfig.DEFAULT_INTERVAL_SECONDS;
-        try {
-            String raw = intervalInput.getText().toString().trim();
-            if (!raw.isEmpty()) {
-                interval = Integer.parseInt(raw);
-            }
-        } catch (NumberFormatException ignored) {
-            // 입력이 끝나지 않은 상태에서는 기본 주기를 쓴다.
-        }
         return new UploadConfig(
-                teamInput.getText().toString(),
-                sensorInput.getText().toString(),
+                keyInput.getText().toString(),
+                deviceNameInput.getText().toString(),
                 autoUploadCheck.isChecked(),
-                interval,
                 parseCoordinate(latInput),
                 parseCoordinate(lonInput));
     }
@@ -528,6 +838,7 @@ public class MainActivity extends Activity {
         uploadSuccessCount = state.uploadSuccessCount;
         uploadFailureCount = state.uploadFailureCount;
         lastServerMessage = state.lastServerMessage;
+        backlogSummary = state.backlogSummary;
 
         handler.removeCallbacks(elapsedTicker);
         updateStatusText();
@@ -543,6 +854,7 @@ public class MainActivity extends Activity {
                     : "진단 모드 해제: 0x181A 필터를 사용합니다.");
         });
         updateUploadStatusText();
+        scheduleLedgerRefresh();
         if (scanning) {
             handler.postDelayed(elapsedTicker, 1000L);
         }
@@ -582,8 +894,12 @@ public class MainActivity extends Activity {
         String response = TextUtils.isEmpty(lastServerMessage)
                 ? getString(R.string.upload_status_no_response)
                 : lastServerMessage;
-        uploadStatusText.setText(getString(R.string.upload_status_format,
-                uploadSuccessCount, uploadFailureCount, response));
+        String status = getString(R.string.upload_status_format,
+                uploadSuccessCount, uploadFailureCount, response);
+        if (!TextUtils.isEmpty(backlogSummary)) {
+            status += "\n" + backlogSummary;
+        }
+        uploadStatusText.setText(status);
     }
 
     private void addVisibleRecord(BleRecord record) {
@@ -633,16 +949,6 @@ public class MainActivity extends Activity {
         startButton.setEnabled(!scanning && !saving && bluetoothAdapter != null);
         stopButton.setEnabled(scanning && !saving);
         saveButton.setEnabled(!collectedRecords.isEmpty() && !saving);
-        uploadButton.setEnabled(hasParsedRecord());
-    }
-
-    private boolean hasParsedRecord() {
-        for (int i = collectedRecords.size() - 1; i >= 0; i--) {
-            if (collectedRecords.get(i).sensor != null) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private boolean wasAsked(String key) {

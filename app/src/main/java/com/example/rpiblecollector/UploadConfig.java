@@ -7,67 +7,79 @@ import android.provider.Settings;
 import android.text.TextUtils;
 
 /**
- * PDF 21쪽 요청 양식 중 사용자가 직접 정해야 하는 값(team, sensor)과
- * 자동 전송 주기를 보관한다. 값은 SharedPreferences 에 유지된다.
+ * 5주차 PDF 48쪽 요청 양식 중 사용자가 직접 정해야 하는 값(key)과
+ * 전송 대상 BLE 장치 이름, 자동 전송 주기를 보관한다. 값은 SharedPreferences 에 유지된다.
+ *
+ * <p>요청의 {@code sensor} 는 따로 입력받지 않고 대상 장치 이름(파이의 광고 로컬네임)을
+ * 그대로 쓴다. 이름이 두 개면 헷갈리기 쉽고, 서버에는 정렬·중복 처리가 없어 중간에
+ * 이름이 바뀌면 센서가 둘인 것처럼 보이기 때문이다.
  */
 public final class UploadConfig {
     private static final String PREFS_NAME = "upload_preferences";
-    private static final String KEY_TEAM = "team";
-    private static final String KEY_SENSOR = "sensor";
+    private static final String KEY_API_KEY = "api_key";
+    private static final String KEY_DEVICE_NAME = "device_name";
     private static final String KEY_AUTO_UPLOAD = "auto_upload";
-    private static final String KEY_INTERVAL_SECONDS = "interval_seconds";
     private static final String KEY_LATITUDE = "latitude";
     private static final String KEY_LONGITUDE = "longitude";
 
-    /** 서버 수신 현황 페이지의 다른 팀 표기가 "4" 이므로 숫자만 쓴다. */
-    public static final String DEFAULT_TEAM = "9";
     /**
-     * 서버 수신 현황 페이지에서 "검증 성공" 한 레코드들이 쓰는 센서명.
-     * BLE 광고의 장치 이름(opensrc_week_3)과는 다르다.
+     * 팀별로 발급된 key. PDF 48쪽 예시(3조 = opensrc-team3)의 형식을 따른 기본값이며,
+     * 조교에게 받은 키가 다르면 화면에서 바꾼다.
      */
-    public static final String DEFAULT_SENSOR = "environment_sensor";
-    public static final int DEFAULT_INTERVAL_SECONDS = 10;
-    public static final int MIN_INTERVAL_SECONDS = 1;
+    public static final String DEFAULT_API_KEY = "opensrc-team9";
     /**
-     * 라즈베리 파이(D8:3A:DD:C1:89:2E)의 위치.
-     * 서버 수신 현황 페이지에서 같은 MAC 으로 "검증 성공" 한 레코드들이 쓰는 좌표를 기본값으로 둔다.
+     * 우리 팀 라즈베리 파이의 광고 localname (PDF 44쪽: 팀 번호로 설정).
+     * 주변의 다른 팀 파이도 같은 0x181A 로 광고하므로 이 이름인 패킷만 서버로 보낸다.
      */
+    public static final String DEFAULT_DEVICE_NAME = "Opensrc_team9";
+    /** 센서(라즈베리 파이)를 설치한 위치. 설치 위치를 옮기면 화면에서 바꾼다. */
     public static final double DEFAULT_LATITUDE = 36.629011;
     public static final double DEFAULT_LONGITUDE = 127.457092;
 
-    public final String team;
-    public final String sensor;
+    public final String apiKey;
+    /** 전송 대상 BLE 장치 이름. 비어 있으면 0x181A 패킷을 모두 전송한다. */
+    public final String deviceName;
+    /** 켜져 있으면 장부에 대기 행이 생기는 대로 보낸다. 꺼져 있으면 "지금 전송" 때만 보낸다. */
     public final boolean autoUpload;
-    public final int intervalSeconds;
     /**
-     * PDF 21쪽 요청 양식의 lat / lon. 센서(라즈베리 파이)가 고정 위치에 있으므로
-     * GPS 대신 화면에서 입력받는다. Android 12+ 에서 위치 권한을 선언하면
-     * BLUETOOTH_SCAN 의 neverForLocation 과 충돌해 스캔이 막히기 때문이다.
+     * 요청 양식의 lat / lon 기본값. 실제 전송에는 GPS 위치(LocationTracker)를 쓰고,
+     * 위치를 얻지 못했을 때만 화면에서 입력한 이 좌표를 쓴다.
      */
     public final double latitude;
     public final double longitude;
 
-    public UploadConfig(String team, String sensor, boolean autoUpload, int intervalSeconds,
+    public UploadConfig(String apiKey, String deviceName,
+                        boolean autoUpload,
                         double latitude, double longitude) {
-        this.team = TextUtils.isEmpty(team) ? DEFAULT_TEAM : team.trim();
-        this.sensor = sensor == null ? "" : sensor.trim();
+        this.apiKey = apiKey == null ? "" : apiKey.trim();
+        this.deviceName = deviceName == null ? "" : deviceName.trim();
         this.autoUpload = autoUpload;
-        this.intervalSeconds = Math.max(MIN_INTERVAL_SECONDS, intervalSeconds);
         this.latitude = latitude;
         this.longitude = longitude;
     }
 
-    public long intervalMillis() {
-        return intervalSeconds * 1000L;
+    /**
+     * 요청의 {@code sensor} 값: 대상 장치 이름. 이름을 비워 두어 모든 장치를 받는 경우에만
+     * 그 데이터가 수신된 장치 이름(fallback)을 쓴다.
+     */
+    public String sensorName(String fallback) {
+        if (!deviceName.isEmpty()) {
+            return deviceName;
+        }
+        return fallback == null ? "" : fallback;
+    }
+
+    /** 이 레코드가 우리 팀 센서에서 온 것인지. 장치 이름을 비워 두면 모두 허용한다. */
+    public boolean matchesDevice(BleRecord record) {
+        return deviceName.isEmpty() || deviceName.equalsIgnoreCase(record.name);
     }
 
     public static UploadConfig load(Context context) {
         SharedPreferences prefs = prefs(context);
         return new UploadConfig(
-                prefs.getString(KEY_TEAM, DEFAULT_TEAM),
-                prefs.getString(KEY_SENSOR, DEFAULT_SENSOR),
+                prefs.getString(KEY_API_KEY, DEFAULT_API_KEY),
+                prefs.getString(KEY_DEVICE_NAME, DEFAULT_DEVICE_NAME),
                 prefs.getBoolean(KEY_AUTO_UPLOAD, false),
-                prefs.getInt(KEY_INTERVAL_SECONDS, DEFAULT_INTERVAL_SECONDS),
                 Double.longBitsToDouble(prefs.getLong(KEY_LATITUDE,
                         Double.doubleToRawLongBits(DEFAULT_LATITUDE))),
                 Double.longBitsToDouble(prefs.getLong(KEY_LONGITUDE,
@@ -76,10 +88,9 @@ public final class UploadConfig {
 
     public void save(Context context) {
         prefs(context).edit()
-                .putString(KEY_TEAM, team)
-                .putString(KEY_SENSOR, sensor)
+                .putString(KEY_API_KEY, apiKey)
+                .putString(KEY_DEVICE_NAME, deviceName)
                 .putBoolean(KEY_AUTO_UPLOAD, autoUpload)
-                .putInt(KEY_INTERVAL_SECONDS, intervalSeconds)
                 .putLong(KEY_LATITUDE, Double.doubleToRawLongBits(latitude))
                 .putLong(KEY_LONGITUDE, Double.doubleToRawLongBits(longitude))
                 .apply();

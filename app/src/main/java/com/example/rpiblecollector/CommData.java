@@ -18,24 +18,10 @@ import retrofit2.http.Query;
  *   <li>{@code @Query} : GET 통신 시 query parameter 를 url 뒤에 추가</li>
  * </ul>
  *
- * <p>실제 제출용 API 는 PDF 21쪽의 {@code POST /sensor/opensrc/test/} 이므로
+ * <p>실제 제출용 API 는 5주차 PDF 48쪽의 {@code POST /sensor/opensrc/upload/} 이므로
  * {@link #post_json(PostData)} 를 사용한다.
  */
 public interface CommData {
-    /** PDF 21쪽 요청 양식: URL {@code /sensor/opensrc/test/}, Method POST, Body JSON. */
     @POST(SensorUploader.SEND_PATH)
     Call<PostResponse> post_json(@Body PostData pd);
-
-    /** 서버 응답을 JSON 으로 파싱하지 않고 원문 그대로 확인하고 싶을 때(ScalarsConverterFactory). */
-    @POST(SensorUploader.SEND_PATH)
-    Call<String> post_json_raw(@Body PostData pd);
-
-    /** PDF 19쪽 "Key-Value 형식의 데이터 전송" 예시. */
-    @FormUrlEncoded
-    @POST(SensorUploader.SEND_PATH)
-    Call<String> post(@Field("user") String user, @Field("data") String data);
-
-    /** PDF 19쪽 "GET 방식의 데이터 전송" 예시. 수집 현황 확인 페이지 조회에 사용한다. */
-    @GET(SensorUploader.CHECK_PATH)
-    Call<String> get(@Query("team") String team, @Query("sensor") String sensor);
 }

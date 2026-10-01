@@ -49,6 +49,13 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:visibility="gone" />
+
+        <include
+            android:id="@+id/pageLedger"
+            layout="@layout/page_ledger"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
     </FrameLayout>
 
     <View
@@ -71,6 +78,11 @@
             android:id="@+id/tabSend"
             style="@style/BottomTab"
             android:text="@string/tab_send" />
+
+        <TextView
+            android:id="@+id/tabLedger"
+            style="@style/BottomTab"
+            android:text="@string/tab_ledger" />
     </LinearLayout>
 
 </LinearLayout>

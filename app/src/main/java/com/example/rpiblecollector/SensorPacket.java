@@ -20,6 +20,12 @@ import java.util.Locale;
 public final class SensorPacket {
     /** 센서 페이로드 길이. 이 뒤부터가 HMAC 태그이다. */
     public static final int SENSOR_PAYLOAD_LENGTH = 13;
+    /**
+     * 파이가 요청받은 시각에 샘플이 없을 때 보내는 "데이터 없음" 표시의 온도·습도 원시값.
+     * 물리적으로 나올 수 없는 값이고, 이때 timestamp 는 요청한 시각 그대로이다.
+     */
+    static final short NO_DATA_TEMP_RAW = 0x7FFF;
+    static final int NO_DATA_HUMIDITY_RAW = 0xFFFF;
 
     private static final byte[] NO_TAG = new byte[0];
 
@@ -29,17 +35,21 @@ public final class SensorPacket {
     public final int tvoc;
     public final int eco2;
     public final long timestamp;
+    /** 파이의 "데이터 없음" 표시 패킷이면 true. 서버로 보내면 안 된다. */
+    public final boolean noData;
     /** 13바이트 이후의 원본 바이트(HMAC 태그). 태그가 없으면 길이 0. */
     private final byte[] hmacTag;
 
     private SensorPacket(float temperature, float humidity, int aqi,
-                         int tvoc, int eco2, long timestamp, byte[] hmacTag) {
+                         int tvoc, int eco2, long timestamp, boolean noData,
+                         byte[] hmacTag) {
         this.temperature = temperature;
         this.humidity = humidity;
         this.aqi = aqi;
         this.tvoc = tvoc;
         this.eco2 = eco2;
         this.timestamp = timestamp;
+        this.noData = noData;
         this.hmacTag = hmacTag;
     }
 
@@ -49,8 +59,10 @@ public final class SensorPacket {
         }
 
         ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
-        float temperature = buf.getShort() / 100.0f;
-        float humidity = (buf.getShort() & 0xFFFF) / 100.0f;
+        short temperatureRaw = buf.getShort();
+        int humidityRaw = buf.getShort() & 0xFFFF;
+        float temperature = temperatureRaw / 100.0f;
+        float humidity = humidityRaw / 100.0f;
         int aqi = buf.get() & 0xFF;
         int tvoc = buf.getShort() & 0xFFFF;
         int eco2 = buf.getShort() & 0xFFFF;
@@ -59,7 +71,9 @@ public final class SensorPacket {
         byte[] tag = data.length > SENSOR_PAYLOAD_LENGTH
                 ? Arrays.copyOfRange(data, SENSOR_PAYLOAD_LENGTH, data.length)
                 : NO_TAG;
-        return new SensorPacket(temperature, humidity, aqi, tvoc, eco2, timestamp, tag);
+        boolean noData = temperatureRaw == NO_DATA_TEMP_RAW
+                && humidityRaw == NO_DATA_HUMIDITY_RAW;
+        return new SensorPacket(temperature, humidity, aqi, tvoc, eco2, timestamp, noData, tag);
     }
 
     public boolean hasHmacTag() {
