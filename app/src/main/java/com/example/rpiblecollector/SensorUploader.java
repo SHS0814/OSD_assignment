@@ -66,10 +66,33 @@ public final class SensorUploader {
     }
 
     /**
+     * 장부 행 하나를 서버로 보낸다. 서버로 나가는 유일한 입구다.
+     *
+     * <p>{@link BacklogDb.Row} 는 장부 DB 에서만 만들어지므로, 장부에 기록되지 않은 데이터는
+     * 이 메서드로 보낼 수 없다. 이미 전송된 행과 "데이터 없음" 행도 여기서 거부한다.
+     *
+     * @return 실제로 보낸 요청 본문 (로그용)
+     */
+    public PostData send(BacklogDb.Row row, String key, String sensor, String sender,
+                         UploadCallback callback) {
+        if (row.noData) {
+            throw new IllegalArgumentException("데이터 없음 행은 서버로 보내지 않습니다: " + row.timestamp);
+        }
+        if (row.uploaded) {
+            throw new IllegalArgumentException("이미 전송된 행입니다: " + row.timestamp);
+        }
+        PostData body = new PostData();
+        body.set_data(key, sensor, row.mac, row.temp, row.humidity,
+                row.aqi, row.tvoc, row.eco2, row.timestamp, row.lat, row.lon, sender);
+        post(body, callback);
+        return body;
+    }
+
+    /**
      * PDF 21쪽 "데이터 전송 코드".
      * enqueue: 데이터의 비동기 전송 / onResponse: 통신 성공 시 응답 처리 / onFailure: 통신 실패 시 수행.
      */
-    public void send(final PostData body, final UploadCallback callback) {
+    private void post(final PostData body, final UploadCallback callback) {
         Call<PostResponse> call = service.post_json(body);
         call.enqueue(new Callback<PostResponse>() {
             @Override

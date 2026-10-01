@@ -97,30 +97,6 @@ public final class PostData {
         this.sender = sender;
     }
 
-    /**
-     * 수집한 BLE 레코드 하나를 5주차 PDF 48쪽 요청 양식으로 변환한다.
-     *
-     * @param key    팀별로 발급된 API key
-     * @param sensor 센서 이름 (비워 두면 BLE 광고의 장치 이름을 사용)
-     * @param sender 스마트폰 UUID (Settings.Secure.ANDROID_ID)
-     * @return 센서 패킷 파싱에 실패한 레코드면 {@code null}
-     */
-    public static PostData from(BleRecord record, String key, String sensor, String sender) {
-        SensorPacket packet = record.sensor;
-        if (packet == null) {
-            return null;
-        }
-        String sensorName = sensor == null || sensor.trim().isEmpty()
-                ? record.name
-                : sensor.trim();
-        PostData body = new PostData();
-        body.set_data(key, sensorName, record.address,
-                round2(packet.temperature), round2(packet.humidity),
-                packet.aqi, packet.tvoc, packet.eco2, packet.timestamp,
-                record.latitude, record.longitude, sender);
-        return body;
-    }
-
     public String getKey() {
         return key;
     }
@@ -144,7 +120,4 @@ public final class PostData {
                 key, sensor, mac, temp, humidity, AQI, TVOC, eCO2, timestamp, lat, lon);
     }
 
-    private static double round2(float value) {
-        return Math.round(value * 100.0) / 100.0;
-    }
 }

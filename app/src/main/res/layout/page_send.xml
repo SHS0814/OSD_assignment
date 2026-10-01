@@ -37,32 +37,14 @@
             android:maxLines="1"
             android:textSize="13sp" />
 
-        <LinearLayout
+        <EditText
+            android:id="@+id/deviceNameInput"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <EditText
-                android:id="@+id/sensorInput"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="@string/sensor_hint"
-                android:inputType="text|textNoSuggestions"
-                android:maxLines="1"
-                android:textSize="13sp" />
-
-            <EditText
-                android:id="@+id/deviceNameInput"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:hint="@string/device_name_hint"
-                android:inputType="text|textNoSuggestions"
-                android:maxLines="1"
-                android:textSize="13sp" />
-        </LinearLayout>
+            android:hint="@string/device_name_hint"
+            android:inputType="text|textNoSuggestions"
+            android:maxLines="1"
+            android:textSize="13sp" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -105,27 +87,6 @@
                 android:text="@string/auto_upload"
                 android:textColor="@color/text_primary"
                 android:textSize="13sp" />
-
-            <EditText
-                android:id="@+id/intervalInput"
-                android:layout_width="68dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:hint="@string/interval_hint"
-                android:inputType="number"
-                android:maxLines="1"
-                android:textSize="13sp" />
-
-            <Button
-                android:id="@+id/uploadButton"
-                android:layout_width="0dp"
-                android:layout_height="46dp"
-                android:layout_marginStart="6dp"
-                android:layout_weight="1"
-                android:enabled="false"
-                android:text="@string/upload_now"
-                android:textAllCaps="false"
-                android:textSize="12sp" />
 
             <Button
                 android:id="@+id/checkPageButton"
