@@ -8,7 +8,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="@string/ledger_title"
+        android:text="@string/archive_title"
         android:textColor="@color/text_primary"
         android:textSize="14sp"
         android:textStyle="bold" />
@@ -17,12 +17,12 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="2dp"
-        android:text="@string/ledger_description"
+        android:text="@string/archive_description"
         android:textColor="@color/text_secondary"
         android:textSize="11sp" />
 
     <TextView
-        android:id="@+id/ledgerSummaryText"
+        android:id="@+id/archiveSummaryText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
@@ -38,20 +38,20 @@
         android:orientation="horizontal">
 
         <Button
-            android:id="@+id/ledgerSendButton"
+            android:id="@+id/archiveSendButton"
             style="@style/ControlButton"
             android:layout_height="46dp"
             android:layout_marginStart="0dp"
-            android:text="@string/ledger_send_now"
+            android:text="@string/archive_send_now"
             android:textSize="12sp" />
 
         <Button
-            android:id="@+id/ledgerRetryButton"
+            android:id="@+id/archiveRetryButton"
             style="@style/ControlButton"
             android:layout_height="46dp"
             android:layout_marginEnd="0dp"
             android:enabled="false"
-            android:text="@string/ledger_retry_failed"
+            android:text="@string/archive_retry_failed"
             android:textSize="12sp" />
     </LinearLayout>
 
@@ -61,19 +61,19 @@
         android:orientation="horizontal">
 
         <Button
-            android:id="@+id/ledgerImportButton"
+            android:id="@+id/archiveImportButton"
             style="@style/ControlButton"
             android:layout_height="46dp"
             android:layout_marginStart="0dp"
-            android:text="@string/ledger_import"
+            android:text="@string/archive_import"
             android:textSize="12sp" />
 
         <Button
-            android:id="@+id/ledgerSaveButton"
+            android:id="@+id/archiveSaveButton"
             style="@style/ControlButton"
             android:layout_height="46dp"
             android:layout_marginEnd="0dp"
-            android:text="@string/ledger_save"
+            android:text="@string/archive_save"
             android:textSize="12sp" />
     </LinearLayout>
 
@@ -85,33 +85,33 @@
         android:orientation="horizontal">
 
         <TextView
-            android:id="@+id/ledgerFilterAll"
+            android:id="@+id/archiveFilterAll"
             style="@style/BottomTab"
-            android:text="@string/ledger_filter_all"
+            android:text="@string/archive_filter_all"
             android:textSize="13sp" />
 
         <TextView
-            android:id="@+id/ledgerFilterPending"
+            android:id="@+id/archiveFilterPending"
             style="@style/BottomTab"
-            android:text="@string/ledger_filter_pending"
+            android:text="@string/archive_filter_pending"
             android:textSize="13sp" />
 
         <TextView
-            android:id="@+id/ledgerFilterFailed"
+            android:id="@+id/archiveFilterFailed"
             style="@style/BottomTab"
-            android:text="@string/ledger_filter_failed"
+            android:text="@string/archive_filter_failed"
             android:textSize="13sp" />
 
         <TextView
-            android:id="@+id/ledgerFilterUploaded"
+            android:id="@+id/archiveFilterUploaded"
             style="@style/BottomTab"
-            android:text="@string/ledger_filter_uploaded"
+            android:text="@string/archive_filter_uploaded"
             android:textSize="13sp" />
 
         <TextView
-            android:id="@+id/ledgerFilterNoData"
+            android:id="@+id/archiveFilterNoData"
             style="@style/BottomTab"
-            android:text="@string/ledger_filter_no_data"
+            android:text="@string/archive_filter_no_data"
             android:textSize="13sp" />
     </LinearLayout>
 
@@ -119,12 +119,12 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
-        android:text="@string/ledger_list_hint"
+        android:text="@string/archive_list_hint"
         android:textColor="@color/text_secondary"
         android:textSize="11sp" />
 
     <ListView
-        android:id="@+id/ledgerList"
+        android:id="@+id/archiveList"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="2dp"

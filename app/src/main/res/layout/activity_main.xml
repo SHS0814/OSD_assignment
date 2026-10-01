@@ -51,8 +51,8 @@
             android:visibility="gone" />
 
         <include
-            android:id="@+id/pageLedger"
-            layout="@layout/page_ledger"
+            android:id="@+id/pageArchive"
+            layout="@layout/page_archive"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:visibility="gone" />
@@ -80,9 +80,9 @@
             android:text="@string/tab_send" />
 
         <TextView
-            android:id="@+id/tabLedger"
+            android:id="@+id/tabArchive"
             style="@style/BottomTab"
-            android:text="@string/tab_ledger" />
+            android:text="@string/tab_archive" />
     </LinearLayout>
 
 </LinearLayout>

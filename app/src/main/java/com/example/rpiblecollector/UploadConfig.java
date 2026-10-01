@@ -39,7 +39,7 @@ public final class UploadConfig {
     public final String apiKey;
     /** 전송 대상 BLE 장치 이름. 비어 있으면 0x181A 패킷을 모두 전송한다. */
     public final String deviceName;
-    /** 켜져 있으면 장부에 대기 행이 생기는 대로 보낸다. 꺼져 있으면 "지금 전송" 때만 보낸다. */
+    /** 켜져 있으면 보관함에 대기 행이 생기는 대로 보낸다. 꺼져 있으면 "지금 전송" 때만 보낸다. */
     public final boolean autoUpload;
     /**
      * 요청 양식의 lat / lon 기본값. 실제 전송에는 GPS 위치(LocationTracker)를 쓰고,

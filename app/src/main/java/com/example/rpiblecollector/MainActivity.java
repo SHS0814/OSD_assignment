@@ -93,26 +93,26 @@ public class MainActivity extends Activity {
     private TextView tabSend;
     private ArrayAdapter<String> scanListAdapter;
 
-    // --- 장부 관리 화면 ---
-    private static final int LEDGER_ROW_LIMIT = 500;
-    private static final long LEDGER_REFRESH_DELAY_MILLIS = 500L;
-    private View pageLedger;
-    private TextView tabLedger;
-    private TextView ledgerSummaryText;
-    private Button ledgerSendButton;
-    private Button ledgerRetryButton;
-    private Button ledgerImportButton;
-    private Button ledgerSaveButton;
-    private TextView[] ledgerFilterViews;
-    private BacklogDb.Filter ledgerFilter = BacklogDb.Filter.ALL;
-    private final List<BacklogDb.Row> ledgerRows = new ArrayList<>();
-    private final List<String> ledgerRowTexts = new ArrayList<>();
-    private ArrayAdapter<String> ledgerAdapter;
-    private boolean ledgerRefreshPosted;
+    // --- 보관함 관리 화면 ---
+    private static final int ARCHIVE_ROW_LIMIT = 500;
+    private static final long ARCHIVE_REFRESH_DELAY_MILLIS = 500L;
+    private View pageArchive;
+    private TextView tabArchive;
+    private TextView archiveSummaryText;
+    private Button archiveSendButton;
+    private Button archiveRetryButton;
+    private Button archiveImportButton;
+    private Button archiveSaveButton;
+    private TextView[] archiveFilterViews;
+    private BacklogDb.Filter archiveFilter = BacklogDb.Filter.ALL;
+    private final List<BacklogDb.Row> archiveRows = new ArrayList<>();
+    private final List<String> archiveRowTexts = new ArrayList<>();
+    private ArrayAdapter<String> archiveAdapter;
+    private boolean archiveRefreshPosted;
 
-    private final Runnable ledgerRefresher = () -> {
-        ledgerRefreshPosted = false;
-        refreshLedger();
+    private final Runnable archiveRefresher = () -> {
+        archiveRefreshPosted = false;
+        refreshArchive();
     };
 
     private final Runnable elapsedTicker = new Runnable() {
@@ -228,25 +228,25 @@ public class MainActivity extends Activity {
         tabCollect = findViewById(R.id.tabCollect);
         tabSend = findViewById(R.id.tabSend);
         ListView scanList = findViewById(R.id.scanList);
-        pageLedger = findViewById(R.id.pageLedger);
-        tabLedger = findViewById(R.id.tabLedger);
-        ledgerSummaryText = findViewById(R.id.ledgerSummaryText);
-        ledgerSendButton = findViewById(R.id.ledgerSendButton);
-        ledgerRetryButton = findViewById(R.id.ledgerRetryButton);
-        ledgerImportButton = findViewById(R.id.ledgerImportButton);
-        ledgerSaveButton = findViewById(R.id.ledgerSaveButton);
-        ledgerFilterViews = new TextView[]{
-                findViewById(R.id.ledgerFilterAll),
-                findViewById(R.id.ledgerFilterPending),
-                findViewById(R.id.ledgerFilterFailed),
-                findViewById(R.id.ledgerFilterUploaded),
-                findViewById(R.id.ledgerFilterNoData)
+        pageArchive = findViewById(R.id.pageArchive);
+        tabArchive = findViewById(R.id.tabArchive);
+        archiveSummaryText = findViewById(R.id.archiveSummaryText);
+        archiveSendButton = findViewById(R.id.archiveSendButton);
+        archiveRetryButton = findViewById(R.id.archiveRetryButton);
+        archiveImportButton = findViewById(R.id.archiveImportButton);
+        archiveSaveButton = findViewById(R.id.archiveSaveButton);
+        archiveFilterViews = new TextView[]{
+                findViewById(R.id.archiveFilterAll),
+                findViewById(R.id.archiveFilterPending),
+                findViewById(R.id.archiveFilterFailed),
+                findViewById(R.id.archiveFilterUploaded),
+                findViewById(R.id.archiveFilterNoData)
         };
-        ListView ledgerList = findViewById(R.id.ledgerList);
-        ledgerAdapter = new ArrayAdapter<>(this, R.layout.item_ledger_row, ledgerRowTexts);
-        ledgerList.setAdapter(ledgerAdapter);
-        ledgerList.setOnItemClickListener((parent, view, position, id) ->
-                showLedgerRowDialog(position));
+        ListView archiveList = findViewById(R.id.archiveList);
+        archiveAdapter = new ArrayAdapter<>(this, R.layout.item_archive_row, archiveRowTexts);
+        archiveList.setAdapter(archiveAdapter);
+        archiveList.setOnItemClickListener((parent, view, position, id) ->
+                showArchiveRowDialog(position));
 
         scanListAdapter = new ArrayAdapter<>(this,
                 android.R.layout.simple_list_item_1, visibleRows);
@@ -261,17 +261,17 @@ public class MainActivity extends Activity {
         checkPageButton.setOnClickListener(v -> openCheckPage());
         tabCollect.setOnClickListener(v -> showPage(PAGE_COLLECT));
         tabSend.setOnClickListener(v -> showPage(PAGE_SEND));
-        tabLedger.setOnClickListener(v -> showPage(PAGE_LEDGER));
-        ledgerSendButton.setOnClickListener(v -> sendPending());
-        ledgerRetryButton.setOnClickListener(v -> retryFailed());
-        ledgerImportButton.setOnClickListener(v -> showCsvPicker());
-        ledgerSaveButton.setOnClickListener(v -> saveLedger());
+        tabArchive.setOnClickListener(v -> showPage(PAGE_ARCHIVE));
+        archiveSendButton.setOnClickListener(v -> sendPending());
+        archiveRetryButton.setOnClickListener(v -> retryFailed());
+        archiveImportButton.setOnClickListener(v -> showCsvPicker());
+        archiveSaveButton.setOnClickListener(v -> saveArchive());
         BacklogDb.Filter[] filters = BacklogDb.Filter.values();
-        for (int i = 0; i < ledgerFilterViews.length; i++) {
+        for (int i = 0; i < archiveFilterViews.length; i++) {
             final BacklogDb.Filter filter = filters[i];
-            ledgerFilterViews[i].setOnClickListener(v -> {
-                ledgerFilter = filter;
-                refreshLedger();
+            archiveFilterViews[i].setOnClickListener(v -> {
+                archiveFilter = filter;
+                refreshArchive();
             });
         }
         showPage(PAGE_COLLECT);
@@ -467,7 +467,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 장부에서 아직 전송되지 않은 행을 5주차 PDF 48쪽 API 로 지금 모두 POST 한다. */
+    /** 보관함에서 아직 전송되지 않은 행을 5주차 PDF 48쪽 API 로 지금 모두 POST 한다. */
     private void sendPending() {
         if (TextUtils.isEmpty(keyInput.getText().toString().trim())) {
             Toast.makeText(this, "팀별 API key 를 입력해 주세요.", Toast.LENGTH_SHORT).show();
@@ -547,23 +547,23 @@ public class MainActivity extends Activity {
         return last == null ? uri.toString() : last;
     }
 
-    /** 수집 CSV·장부 CSV 를 장부로 가져온다. 서버 전송은 장부의 전송 큐가 맡는다. */
+    /** 수집 CSV·보관함 CSV 를 보관함으로 가져온다. 서버 전송은 보관함의 전송 큐가 맡는다. */
     private void importCsv(Uri uri, String name) {
         if (!serviceBound) {
             Toast.makeText(this, "잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show();
             return;
         }
         pushUploadConfig();
-        ledgerImportButton.setEnabled(false);
-        ledgerSummaryText.setText(getString(R.string.csv_loading, name));
+        archiveImportButton.setEnabled(false);
+        archiveSummaryText.setText(getString(R.string.csv_loading, name));
         scanService.importCsv(uri, name, (success, message) -> {
             if (isDestroyed()) {
                 return;
             }
-            ledgerImportButton.setEnabled(true);
-            refreshLedger();
+            archiveImportButton.setEnabled(true);
+            refreshArchive();
             new AlertDialog.Builder(this)
-                    .setTitle(success ? R.string.ledger_import_done : R.string.ledger_import_failed)
+                    .setTitle(success ? R.string.archive_import_done : R.string.archive_import_failed)
                     .setMessage(message + (success && !autoUploadCheck.isChecked()
                             ? "\n\n자동 전송이 꺼져 있습니다. '지금 전송' 을 누르면 대기 행을 보냅니다."
                             : ""))
@@ -572,16 +572,16 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void saveLedger() {
+    private void saveArchive() {
         if (!serviceBound) {
             return;
         }
-        ledgerSaveButton.setEnabled(false);
-        scanService.saveLedgerCsv((success, message) -> {
+        archiveSaveButton.setEnabled(false);
+        scanService.saveArchiveCsv((success, message) -> {
             if (isDestroyed()) {
                 return;
             }
-            ledgerSaveButton.setEnabled(true);
+            archiveSaveButton.setEnabled(true);
             Toast.makeText(this, message, Toast.LENGTH_LONG).show();
         });
     }
@@ -596,18 +596,18 @@ public class MainActivity extends Activity {
                 Toast.LENGTH_SHORT).show();
     }
 
-    /** 장부 행을 누르면 자세한 내용과 관리 동작을 보여 준다. */
-    private void showLedgerRowDialog(int position) {
-        if (position < 0 || position >= ledgerRows.size() || !serviceBound) {
+    /** 보관함 행을 누르면 자세한 내용과 관리 동작을 보여 준다. */
+    private void showArchiveRowDialog(int position) {
+        if (position < 0 || position >= archiveRows.size() || !serviceBound) {
             return;
         }
-        final BacklogDb.Row row = ledgerRows.get(position);
+        final BacklogDb.Row row = archiveRows.get(position);
         if (row.noData) {
             new AlertDialog.Builder(this)
-                    .setTitle(R.string.ledger_row_title)
-                    .setMessage(LedgerCsv.formatKst(row.timestamp * 1000L) + " (KST)\n\n"
-                            + getString(R.string.ledger_no_data_detail))
-                    .setNeutralButton(R.string.ledger_request_again,
+                    .setTitle(R.string.archive_row_title)
+                    .setMessage(ArchiveCsv.formatKst(row.timestamp * 1000L) + " (KST)\n\n"
+                            + getString(R.string.archive_no_data_detail))
+                    .setNeutralButton(R.string.archive_request_again,
                             (d, w) -> scanService.requestAgain(row.timestamp))
                     .setNegativeButton(R.string.cancel, null)
                     .show();
@@ -615,17 +615,17 @@ public class MainActivity extends Activity {
         }
         StringBuilder detail = new StringBuilder()
                 .append("timestamp ").append(row.timestamp).append('\n')
-                .append(LedgerCsv.formatKst(row.timestamp * 1000L)).append(" (KST)\n\n")
+                .append(ArchiveCsv.formatKst(row.timestamp * 1000L)).append(" (KST)\n\n")
                 .append(String.format(Locale.getDefault(),
                         "온도 %.2f°C · 습도 %.2f%%\nAQI %d · TVOC %d ppb · eCO2 %d ppm\n",
                         row.temp, row.humidity, row.aqi, row.tvoc, row.eco2))
                 .append(String.format(Locale.US, "lat %.6f · lon %.6f\n", row.lat, row.lon))
                 .append(row.name).append(" · ").append(row.mac).append('\n')
                 .append("출처 ").append(row.source).append(" · 수신 ")
-                .append(LedgerCsv.formatKst(row.receivedAt)).append("\n\n")
+                .append(ArchiveCsv.formatKst(row.receivedAt)).append("\n\n")
                 .append("상태 ").append(statusLabel(row));
         if (row.uploadedAt > 0L) {
-            detail.append("\n전송 ").append(LedgerCsv.formatKst(row.uploadedAt));
+            detail.append("\n전송 ").append(ArchiveCsv.formatKst(row.uploadedAt));
         }
         if (row.attempts > 0) {
             detail.append("\n서버 거부 ").append(row.attempts).append("회");
@@ -634,17 +634,17 @@ public class MainActivity extends Activity {
             detail.append("\n마지막 오류: ").append(row.lastError);
         }
         AlertDialog.Builder builder = new AlertDialog.Builder(this)
-                .setTitle(R.string.ledger_row_title)
+                .setTitle(R.string.archive_row_title)
                 .setMessage(detail.toString())
                 .setNegativeButton(R.string.cancel, null);
         if (row.uploaded) {
-            builder.setNeutralButton(R.string.ledger_resend, (d, w) -> confirmResend(row));
+            builder.setNeutralButton(R.string.archive_resend, (d, w) -> confirmResend(row));
         } else {
-            builder.setNeutralButton(R.string.ledger_mark_uploaded,
-                    (d, w) -> scanService.markLedgerRowUploaded(row.timestamp));
+            builder.setNeutralButton(R.string.archive_mark_uploaded,
+                    (d, w) -> scanService.markArchiveRowUploaded(row.timestamp));
             if (BacklogDb.STATUS_FAILED.equals(row.status())) {
-                builder.setPositiveButton(R.string.ledger_retry_one,
-                        (d, w) -> scanService.resetLedgerRow(row.timestamp));
+                builder.setPositiveButton(R.string.archive_retry_one,
+                        (d, w) -> scanService.resetArchiveRow(row.timestamp));
             }
         }
         builder.show();
@@ -652,64 +652,64 @@ public class MainActivity extends Activity {
 
     private void confirmResend(BacklogDb.Row row) {
         new AlertDialog.Builder(this)
-                .setTitle(R.string.ledger_resend)
-                .setMessage(R.string.ledger_resend_warning)
-                .setPositiveButton(R.string.ledger_resend,
-                        (d, w) -> scanService.resetLedgerRow(row.timestamp))
+                .setTitle(R.string.archive_resend)
+                .setMessage(R.string.archive_resend_warning)
+                .setPositiveButton(R.string.archive_resend,
+                        (d, w) -> scanService.resetArchiveRow(row.timestamp))
                 .setNegativeButton(R.string.cancel, null)
                 .show();
     }
 
-    /** 서비스 상태가 바뀔 때마다 부르지만, 장부 화면이 보일 때만 0.5초에 한 번 다시 읽는다. */
-    private void scheduleLedgerRefresh() {
-        if (pageLedger.getVisibility() != View.VISIBLE || ledgerRefreshPosted) {
+    /** 서비스 상태가 바뀔 때마다 부르지만, 보관함 화면이 보일 때만 0.5초에 한 번 다시 읽는다. */
+    private void scheduleArchiveRefresh() {
+        if (pageArchive.getVisibility() != View.VISIBLE || archiveRefreshPosted) {
             return;
         }
-        ledgerRefreshPosted = true;
-        handler.postDelayed(ledgerRefresher, LEDGER_REFRESH_DELAY_MILLIS);
+        archiveRefreshPosted = true;
+        handler.postDelayed(archiveRefresher, ARCHIVE_REFRESH_DELAY_MILLIS);
     }
 
-    private void refreshLedger() {
+    private void refreshArchive() {
         BacklogDb.Filter[] filters = BacklogDb.Filter.values();
-        for (int i = 0; i < ledgerFilterViews.length; i++) {
-            boolean selected = filters[i] == ledgerFilter;
-            ledgerFilterViews[i].setTextColor(getColor(selected ? R.color.blue : R.color.text_secondary));
-            ledgerFilterViews[i].setTypeface(null,
+        for (int i = 0; i < archiveFilterViews.length; i++) {
+            boolean selected = filters[i] == archiveFilter;
+            archiveFilterViews[i].setTextColor(getColor(selected ? R.color.blue : R.color.text_secondary));
+            archiveFilterViews[i].setTypeface(null,
                     selected ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
         }
         if (!serviceBound) {
             return;
         }
-        BacklogDb.Stats stats = scanService.getLedgerStats();
+        BacklogDb.Stats stats = scanService.getArchiveStats();
         String range = stats.total == 0 ? "비어 있음"
-                : LedgerCsv.formatKst(stats.firstTs * 1000L).substring(5, 16) + " ~ "
-                + LedgerCsv.formatKst(stats.lastTs * 1000L).substring(5, 16);
+                : ArchiveCsv.formatKst(stats.firstTs * 1000L).substring(5, 16) + " ~ "
+                + ArchiveCsv.formatKst(stats.lastTs * 1000L).substring(5, 16);
         String lastSent = stats.lastUploadedAt > 0L
-                ? LedgerCsv.formatKst(stats.lastUploadedAt).substring(5) : "없음";
-        ledgerSummaryText.setText(getString(R.string.ledger_summary_format,
+                ? ArchiveCsv.formatKst(stats.lastUploadedAt).substring(5) : "없음";
+        archiveSummaryText.setText(getString(R.string.archive_summary_format,
                 stats.total, stats.uploaded, stats.pending, stats.failed, stats.noData,
                 range, lastSent));
-        ledgerRetryButton.setEnabled(stats.failed > 0);
-        ledgerSendButton.setEnabled(stats.pending > 0);
+        archiveRetryButton.setEnabled(stats.failed > 0);
+        archiveSendButton.setEnabled(stats.pending > 0);
 
-        ledgerRows.clear();
-        ledgerRows.addAll(scanService.getLedgerRows(ledgerFilter, LEDGER_ROW_LIMIT));
-        ledgerRowTexts.clear();
-        for (BacklogDb.Row row : ledgerRows) {
-            ledgerRowTexts.add(formatLedgerRow(row));
+        archiveRows.clear();
+        archiveRows.addAll(scanService.getArchiveRows(archiveFilter, ARCHIVE_ROW_LIMIT));
+        archiveRowTexts.clear();
+        for (BacklogDb.Row row : archiveRows) {
+            archiveRowTexts.add(formatArchiveRow(row));
         }
-        ledgerAdapter.notifyDataSetChanged();
+        archiveAdapter.notifyDataSetChanged();
     }
 
-    private String formatLedgerRow(BacklogDb.Row row) {
+    private String formatArchiveRow(BacklogDb.Row row) {
         if (row.noData) {
-            return LedgerCsv.formatKst(row.timestamp * 1000L).substring(5) + "   "
+            return ArchiveCsv.formatKst(row.timestamp * 1000L).substring(5) + "   "
                     + statusLabel(row) + "\n파이에 이 시각 근처 데이터 없음 · 서버로 보내지 않음";
         }
         String line2 = String.format(Locale.getDefault(),
                 "%.2f°C · %.1f%% · AQI %d · TVOC %d · eCO2 %d",
                 row.temp, row.humidity, row.aqi, row.tvoc, row.eco2);
-        return LedgerCsv.formatKst(row.timestamp * 1000L).substring(5) + "   "
+        return ArchiveCsv.formatKst(row.timestamp * 1000L).substring(5) + "   "
                 + statusLabel(row) + "\n" + line2;
     }
 
@@ -728,18 +728,18 @@ public class MainActivity extends Activity {
 
     private static final int PAGE_COLLECT = 0;
     private static final int PAGE_SEND = 1;
-    private static final int PAGE_LEDGER = 2;
+    private static final int PAGE_ARCHIVE = 2;
 
     /** 하단 탭 전환. 앱을 열면 수집 페이지가 먼저 보인다. */
     private void showPage(int page) {
         pageCollect.setVisibility(page == PAGE_COLLECT ? View.VISIBLE : View.GONE);
         pageSend.setVisibility(page == PAGE_SEND ? View.VISIBLE : View.GONE);
-        pageLedger.setVisibility(page == PAGE_LEDGER ? View.VISIBLE : View.GONE);
+        pageArchive.setVisibility(page == PAGE_ARCHIVE ? View.VISIBLE : View.GONE);
         tabCollect.setTextColor(getColor(page == PAGE_COLLECT ? R.color.blue : R.color.text_secondary));
         tabSend.setTextColor(getColor(page == PAGE_SEND ? R.color.blue : R.color.text_secondary));
-        tabLedger.setTextColor(getColor(page == PAGE_LEDGER ? R.color.blue : R.color.text_secondary));
-        if (page == PAGE_LEDGER) {
-            refreshLedger();
+        tabArchive.setTextColor(getColor(page == PAGE_ARCHIVE ? R.color.blue : R.color.text_secondary));
+        if (page == PAGE_ARCHIVE) {
+            refreshArchive();
         }
     }
 
@@ -854,7 +854,7 @@ public class MainActivity extends Activity {
                     : "진단 모드 해제: 0x181A 필터를 사용합니다.");
         });
         updateUploadStatusText();
-        scheduleLedgerRefresh();
+        scheduleArchiveRefresh();
         if (scanning) {
             handler.postDelayed(elapsedTicker, 1000L);
         }

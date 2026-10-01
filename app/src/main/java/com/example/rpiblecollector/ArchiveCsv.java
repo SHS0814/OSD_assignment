@@ -15,26 +15,26 @@ import java.util.Set;
 import java.util.TimeZone;
 
 /**
- * 장부와 CSV 사이의 변환.
+ * 보관함과 CSV 사이의 변환.
  *
  * <ul>
- *   <li>읽기: 수집 CSV({@link CsvExporter} 의 ble_data_*.csv)와 장부 CSV(ledger.csv) 둘 다
- *       읽어 장부에 넣을 {@link Entry} 로 만든다.</li>
- *   <li>쓰기: 장부 전체를 timestamp 순, 중복 없이 ledger.csv 형식으로 쓴다.
+ *   <li>읽기: 수집 CSV({@link CsvExporter} 의 ble_data_*.csv)와 보관함 CSV(archive.csv) 둘 다
+ *       읽어 보관함에 넣을 {@link Entry} 로 만든다.</li>
+ *   <li>쓰기: 보관함 전체를 timestamp 순, 중복 없이 archive.csv 형식으로 쓴다.
  *       이 파일이 곧 "서버에 들어가 있어야 할 데이터" 목록이고, 앱을 다시 설치했을 때
  *       가져오면 전송 상태까지 복구된다.</li>
  * </ul>
  */
-public final class LedgerCsv {
-    public static final String LEDGER_FILE_NAME = "ledger.csv";
+public final class ArchiveCsv {
+    public static final String ARCHIVE_FILE_NAME = "archive.csv";
 
-    static final String[] LEDGER_HEADER = {
+    static final String[] ARCHIVE_HEADER = {
             "ts", "time_kst", "status", "temp", "humidity", "aqi", "tvoc", "eco2",
             "mac", "name", "lat", "lon", "received_at", "source",
             "uploaded_at", "server_status", "attempts", "last_error"
     };
 
-    /** 장부 한 행에 해당하는 값. */
+    /** 보관함 한 행에 해당하는 값. */
     public static final class Entry {
         public long timestamp;
         public double temp;
@@ -49,7 +49,7 @@ public final class LedgerCsv {
         public long receivedAt;
         public String source;
         public boolean uploaded;
-        /** 파이가 "데이터 없음" 으로 답한 시각. 장부에만 남기고 서버로 보내지 않는다. */
+        /** 파이가 "데이터 없음" 으로 답한 시각. 보관함에만 남기고 서버로 보내지 않는다. */
         public boolean noData;
         public long uploadedAt;
         public String serverStatus;
@@ -62,7 +62,7 @@ public final class LedgerCsv {
     /** CSV 를 읽은 결과. */
     public static final class ReadResult {
         public final List<Entry> entries = new ArrayList<>();
-        public boolean ledgerFormat;
+        public boolean archiveFormat;
         public int totalRows;
         public int otherDevice;
         public int invalid;
@@ -71,19 +71,19 @@ public final class LedgerCsv {
 
         public String summary() {
             return String.format(Locale.getDefault(),
-                    "%s · %,d행 중 장부 대상 %,d건(측정값 %,d · 데이터 없음 %,d) · "
+                    "%s · %,d행 중 보관함 대상 %,d건(측정값 %,d · 데이터 없음 %,d) · "
                             + "다른 장치 %,d · 파일 내 중복 %,d · 읽을 수 없음 %,d",
-                    ledgerFormat ? "장부 CSV" : "수집 CSV",
+                    archiveFormat ? "보관함 CSV" : "수집 CSV",
                     totalRows, entries.size(), entries.size() - noData, noData,
                     otherDevice, duplicate, invalid);
         }
     }
 
-    private LedgerCsv() {
+    private ArchiveCsv() {
     }
 
     /**
-     * @param config 수집 CSV 의 대상 장치 필터와 위치 기본값. 장부 CSV 에는 적용하지 않는다.
+     * @param config 수집 CSV 의 대상 장치 필터와 위치 기본값. 보관함 CSV 에는 적용하지 않는다.
      */
     public static ReadResult read(Reader reader, UploadConfig config) throws IOException {
         List<List<String>> lines = parse(reader.markSupported() ? reader : new BufferedReader(reader));
@@ -96,18 +96,18 @@ public final class LedgerCsv {
         }
         ReadResult result = new ReadResult();
         if (header.contains("ts") && header.contains("status")) {
-            result.ledgerFormat = true;
-            readLedger(header, lines.subList(1, lines.size()), result);
+            result.archiveFormat = true;
+            readArchive(header, lines.subList(1, lines.size()), result);
         } else if (header.contains("sensor_unix_timestamp")) {
             readCollection(header, lines.subList(1, lines.size()), config, result);
         } else {
-            throw new IOException("이 앱이 저장한 수집 CSV 나 장부 CSV 가 아닙니다.");
+            throw new IOException("이 앱이 저장한 수집 CSV 나 보관함 CSV 가 아닙니다.");
         }
         return result;
     }
 
     public static void write(Writer writer, List<Entry> entries) throws IOException {
-        writeLine(writer, LEDGER_HEADER);
+        writeLine(writer, ARCHIVE_HEADER);
         for (Entry e : entries) {
             writeLine(writer, new String[]{
                     String.valueOf(e.timestamp),
@@ -133,7 +133,7 @@ public final class LedgerCsv {
         writer.flush();
     }
 
-    private static void readLedger(List<String> header, List<List<String>> rows,
+    private static void readArchive(List<String> header, List<List<String>> rows,
                                    ReadResult result) {
         Set<Long> seen = new HashSet<>();
         for (List<String> row : rows) {

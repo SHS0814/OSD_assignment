@@ -66,7 +66,7 @@ public final class BleScanService extends Service {
             "com.example.rpiblecollector.action.SAVE_CSV";
     public static final String ACTION_STOP_AND_SAVE =
             "com.example.rpiblecollector.action.STOP_AND_SAVE";
-    /** 장부의 대기 행을 지금 모두 보낸다. */
+    /** 보관함의 대기 행을 지금 모두 보낸다. */
     public static final String ACTION_SEND_PENDING =
             "com.example.rpiblecollector.action.SEND_PENDING";
 
@@ -90,7 +90,7 @@ public final class BleScanService extends Service {
     private static final int MAX_CONSECUTIVE_REJECTS = 5;
     private static final String UPLOAD_QUEUED = "queued";
 
-    /** 장부 작업(가져오기·저장) 결과. 메인 스레드에서 호출된다. */
+    /** 보관함 작업(가져오기·저장) 결과. 메인 스레드에서 호출된다. */
     public interface ResultCallback {
         void onResult(boolean success, String message);
     }
@@ -201,7 +201,7 @@ public final class BleScanService extends Service {
     /** 지금 요청 중인 시각. 요청하지 않으면 -1. */
     private long currentWantTs = -1L;
     private boolean queueUploadInFlight;
-    /** "지금 전송": 자동 전송이 꺼져 있어도 장부의 대기 행을 끝까지 보낸다. */
+    /** "지금 전송": 자동 전송이 꺼져 있어도 보관함의 대기 행을 끝까지 보낸다. */
     private boolean manualDrain;
     private int consecutiveRejects;
     /** 서버가 연속 거부해서 멈춘 상태. 설정을 바꾸거나 "지금 전송" 을 누르면 풀린다. */
@@ -428,7 +428,7 @@ public final class BleScanService extends Service {
         config.save(this);
         if (autoChanged) {
             addLog(config.autoUpload
-                    ? "자동 전송 켜짐 · 장부의 대기 행을 들어오는 대로 POST "
+                    ? "자동 전송 켜짐 · 보관함의 대기 행을 들어오는 대로 POST "
                             + SensorUploader.BASE_URL + SensorUploader.SEND_PATH
                     : "자동 전송 꺼짐.");
         }
@@ -436,7 +436,7 @@ public final class BleScanService extends Service {
         notifyStateChanged();
     }
 
-    /** 장부에서 아직 전송되지 않은 행을 자동 전송 설정과 관계없이 지금 모두 보낸다. */
+    /** 보관함에서 아직 전송되지 않은 행을 자동 전송 설정과 관계없이 지금 모두 보낸다. */
     public void sendPendingNow() {
         if (uploadConfig.apiKey.isEmpty()) {
             addLog("전송 실패 · 팀별 key 를 입력해 주세요.");
@@ -447,14 +447,14 @@ public final class BleScanService extends Service {
         }
         int pending = backlogDb.pendingCount();
         if (pending == 0) {
-            String message = "장부에 전송할 데이터가 없습니다.";
+            String message = "보관함에 전송할 데이터가 없습니다.";
             addLog(message);
             if (listener != null) {
                 listener.onUploadResult(false, message);
             }
             return;
         }
-        addLog("지금 전송: 장부의 대기 " + pending + "건을 timestamp 순으로 보냅니다.");
+        addLog("지금 전송: 보관함의 대기 " + pending + "건을 timestamp 순으로 보냅니다.");
         queuePaused = false;
         consecutiveRejects = 0;
         manualDrain = true;
@@ -463,13 +463,13 @@ public final class BleScanService extends Service {
         notifyStateChanged();
     }
 
-    // --- 장부 관리 (관리 화면에서 호출) ---
+    // --- 보관함 관리 (관리 화면에서 호출) ---
 
-    public BacklogDb.Stats getLedgerStats() {
+    public BacklogDb.Stats getArchiveStats() {
         return backlogDb.stats();
     }
 
-    public List<BacklogDb.Row> getLedgerRows(BacklogDb.Filter filter, int limit) {
+    public List<BacklogDb.Row> getArchiveRows(BacklogDb.Filter filter, int limit) {
         return backlogDb.rows(filter, limit);
     }
 
@@ -488,9 +488,9 @@ public final class BleScanService extends Service {
     }
 
     /** 한 행을 대기로 되돌린다. 전송 완료였다면 서버로 한 번 더 간다. */
-    public void resetLedgerRow(long ts) {
+    public void resetArchiveRow(long ts) {
         backlogDb.resetToPending(ts);
-        addLog("장부 " + formatTs(ts) + " 을 대기로 되돌렸습니다.");
+        addLog("보관함 " + formatTs(ts) + " 을 대기로 되돌렸습니다.");
         drainUploadQueue();
         updateBacklogSummary();
         notifyStateChanged();
@@ -500,23 +500,23 @@ public final class BleScanService extends Service {
     public void requestAgain(long ts) {
         backlogDb.deleteNoData(ts);
         gapTimestamps.remove(ts);
-        addLog("장부 " + formatTs(ts) + " 의 '데이터 없음' 을 지웠습니다. 다음 수집 때 다시 요청합니다.");
+        addLog("보관함 " + formatTs(ts) + " 의 '데이터 없음' 을 지웠습니다. 다음 수집 때 다시 요청합니다.");
         refreshBacklogRequest();
         updateBacklogSummary();
         notifyStateChanged();
     }
 
     /** 서버에 이미 있다는 것을 알 때 보내지 않고 전송 완료로만 표시한다. */
-    public void markLedgerRowUploaded(long ts) {
+    public void markArchiveRowUploaded(long ts) {
         backlogDb.markUploadedManually(ts);
-        addLog("장부 " + formatTs(ts) + " 을 전송 완료로 표시했습니다.");
+        addLog("보관함 " + formatTs(ts) + " 을 전송 완료로 표시했습니다.");
         updateBacklogSummary();
         notifyStateChanged();
     }
 
     /**
-     * 수집 CSV 나 장부 CSV 를 장부로 가져온다. 서버로 보내는 것은 가져온 뒤
-     * 장부의 전송 큐가 맡는다(자동 전송이 꺼져 있으면 "지금 전송").
+     * 수집 CSV 나 보관함 CSV 를 보관함으로 가져온다. 서버로 보내는 것은 가져온 뒤
+     * 보관함의 전송 큐가 맡는다(자동 전송이 꺼져 있으면 "지금 전송").
      */
     public void importCsv(final Uri uri, final String name, final ResultCallback callback) {
         final UploadConfig config = uploadConfig;
@@ -527,12 +527,12 @@ public final class BleScanService extends Service {
                 if (in == null) {
                     throw new IOException("파일을 열 수 없습니다.");
                 }
-                LedgerCsv.ReadResult read = LedgerCsv.read(
+                ArchiveCsv.ReadResult read = ArchiveCsv.read(
                         new InputStreamReader(in, StandardCharsets.UTF_8), config);
                 BacklogDb.ImportResult imported = backlogDb.importRows(read.entries);
                 ok = true;
                 message = String.format(Locale.getDefault(),
-                        "%s 가져오기 완료\n%s\n장부에 새로 추가: 대기 %,d · 전송 완료 %,d · "
+                        "%s 가져오기 완료\n%s\n보관함에 새로 추가: 대기 %,d · 전송 완료 %,d · "
                                 + "데이터 없음 %,d\n데이터 없음 → 실제 샘플 %,d · 전송 완료로 갱신 %,d · "
                                 + "이미 있음 %,d",
                         name, read.summary(), imported.added, imported.addedUploaded,
@@ -557,14 +557,14 @@ public final class BleScanService extends Service {
         });
     }
 
-    /** 장부 전체를 앱 폴더의 ledger.csv 로 덮어쓴다(timestamp 순, 중복 없음). */
-    public void saveLedgerCsv(final ResultCallback callback) {
+    /** 보관함 전체를 앱 폴더의 archive.csv 로 덮어쓴다(timestamp 순, 중복 없음). */
+    public void saveArchiveCsv(final ResultCallback callback) {
         fileExecutor.execute(() -> {
             String message;
             boolean ok;
             try {
                 List<BacklogDb.Row> rows = backlogDb.allRowsAscending();
-                List<LedgerCsv.Entry> entries = new ArrayList<>(rows.size());
+                List<ArchiveCsv.Entry> entries = new ArrayList<>(rows.size());
                 for (BacklogDb.Row row : rows) {
                     entries.add(row.toEntry());
                 }
@@ -572,21 +572,21 @@ public final class BleScanService extends Service {
                 if (dir == null) {
                     dir = getFilesDir();
                 }
-                File target = new File(dir, LedgerCsv.LEDGER_FILE_NAME);
-                File temp = new File(dir, LedgerCsv.LEDGER_FILE_NAME + ".tmp");
+                File target = new File(dir, ArchiveCsv.ARCHIVE_FILE_NAME);
+                File temp = new File(dir, ArchiveCsv.ARCHIVE_FILE_NAME + ".tmp");
                 try (Writer writer = new OutputStreamWriter(
                         new FileOutputStream(temp), StandardCharsets.UTF_8)) {
-                    LedgerCsv.write(writer, entries);
+                    ArchiveCsv.write(writer, entries);
                 }
-                // 쓰는 도중 앱이 죽어도 이전 장부 파일이 깨지지 않게 다 쓴 뒤 바꿔 끼운다.
+                // 쓰는 도중 앱이 죽어도 이전 보관함 파일이 깨지지 않게 다 쓴 뒤 바꿔 끼운다.
                 if (!temp.renameTo(target)) {
                     throw new IOException("파일 이름을 바꿀 수 없습니다: " + target);
                 }
                 ok = true;
-                message = "장부 저장 완료 (" + entries.size() + "건)\n" + target.getAbsolutePath();
+                message = "보관함 저장 완료 (" + entries.size() + "건)\n" + target.getAbsolutePath();
             } catch (IOException | RuntimeException e) {
                 ok = false;
-                message = "장부 저장 실패: " + e.getMessage();
+                message = "보관함 저장 실패: " + e.getMessage();
             }
             final boolean success = ok;
             final String result = message;
@@ -909,13 +909,13 @@ public final class BleScanService extends Service {
         onPiSeen(record.address);
         SensorPacket packet = record.sensor;
         if (packet.noData) {
-            // 파이에 이 시각 근처 데이터가 없다는 특수값. 다시 요청하지 않도록 장부에 남기지만
-            // 측정값이 아니므로 전송 큐에는 넣지 않는다(장부의 전송 대상 조건에서 빠진다).
+            // 파이에 이 시각 근처 데이터가 없다는 특수값. 다시 요청하지 않도록 보관함에 남기지만
+            // 측정값이 아니므로 전송 큐에는 넣지 않는다(보관함의 전송 대상 조건에서 빠진다).
             record.setUploadResult("no_data_marker");
             if (backlogDb.insertNoData(record)) {
                 gapTimestamps.add(packet.timestamp);
                 addLog("파이에 " + formatTs(packet.timestamp)
-                        + " 근처 데이터가 없음 → 장부에 기록, 서버로는 보내지 않습니다.");
+                        + " 근처 데이터가 없음 → 보관함에 기록, 서버로는 보내지 않습니다.");
                 refreshBacklogRequest();
             }
             return;
@@ -934,7 +934,7 @@ public final class BleScanService extends Service {
             return;
         }
         haveTimestamps.add(packet.timestamp);
-        // "데이터 없음" 이던 시각에 실제 샘플이 오면 장부에서 실제 샘플로 바뀐다.
+        // "데이터 없음" 이던 시각에 실제 샘플이 오면 보관함에서 실제 샘플로 바뀐다.
         gapTimestamps.remove(packet.timestamp);
         record.setUploadResult(uploadConfig.autoUpload ? UPLOAD_QUEUED : "stored");
         if (past) {
@@ -989,7 +989,7 @@ public final class BleScanService extends Service {
     }
 
     /**
-     * 장부의 미전송 행을 timestamp 순서대로 한 건씩 보낸다. 응답이 오면 다음 건을 보낸다.
+     * 보관함의 미전송 행을 timestamp 순서대로 한 건씩 보낸다. 응답이 오면 다음 건을 보낸다.
      * 서버로 가는 경로는 이것 하나뿐이라 같은 timestamp 가 두 번 가지 않는다.
      */
     private void drainUploadQueue() {
@@ -1001,7 +1001,7 @@ public final class BleScanService extends Service {
         if (row == null) {
             if (manualDrain) {
                 manualDrain = false;
-                addLog("장부의 대기 데이터를 모두 보냈습니다.");
+                addLog("보관함의 대기 데이터를 모두 보냈습니다.");
             }
             updateBacklogSummary();
             notifyStateChanged();
@@ -1028,7 +1028,7 @@ public final class BleScanService extends Service {
             request = "요청 " + formatTs(currentWantTs) + " (" + formatStep(step) + " 간격)";
         }
         backlogSummary = String.format(Locale.getDefault(),
-                "장부 %,d건 · 전송 대기 %,d건%s · %s",
+                "보관함 %,d건 · 전송 대기 %,d건%s · %s",
                 haveTimestamps.size(), backlogDb.pendingCount(),
                 queuePaused ? " (전송 멈춤)" : "", request);
     }

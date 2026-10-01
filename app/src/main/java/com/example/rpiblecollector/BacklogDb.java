@@ -13,10 +13,10 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * 장부: 우리 팀 파이에서 받은 샘플과 서버 전송 기록.
+ * 보관함: 우리 팀 파이에서 받은 샘플과 서버 전송 기록.
  *
- * <p>수집 → 장부 → 서버. BLE 로 받은 샘플과 CSV 에서 가져온 샘플은 모두 이 장부에
- * timestamp 를 기본키로 한 번만 들어가고, 서버 전송은 장부에서 아직 전송되지 않은 행만
+ * <p>수집 → 보관함 → 서버. BLE 로 받은 샘플과 CSV 에서 가져온 샘플은 모두 이 보관함에
+ * timestamp 를 기본키로 한 번만 들어가고, 서버 전송은 보관함에서 아직 전송되지 않은 행만
  * timestamp 순서대로 보낸다. 그래서 같은 timestamp 가 서버로 두 번 가지 않고, 앱이
  * 종료돼도 보내지 못한 데이터가 남는다.
  *
@@ -25,7 +25,7 @@ import java.util.TreeSet;
  * 실패한 행은 자동으로 다시 보내지 않고, 관리 화면의 "실패 재시도" 로 대기로 되돌린다.
  *
  * <p>데이터 없음: 파이가 "요청한 시각 근처에 샘플이 없다" 고 답한 특수값 패킷이다. 같은 시각을
- * 다시 요청하지 않도록 장부에는 남기지만 측정값이 아니므로 서버로는 절대 보내지 않는다.
+ * 다시 요청하지 않도록 보관함에는 남기지만 측정값이 아니므로 서버로는 절대 보내지 않는다.
  * 나중에 같은 timestamp 의 실제 샘플이 들어오면 실제 샘플로 바꾼다.
  */
 public final class BacklogDb extends SQLiteOpenHelper {
@@ -57,7 +57,7 @@ public final class BacklogDb extends SQLiteOpenHelper {
     private static final String FAILED_WHERE =
             "no_data = 0 AND uploaded = 0 AND attempts >= " + MAX_ATTEMPTS;
 
-    /** 장부 한 행. */
+    /** 보관함 한 행. */
     public static final class Row {
         public final long timestamp;
         public final double temp;
@@ -102,8 +102,8 @@ public final class BacklogDb extends SQLiteOpenHelper {
             noData = c.getInt(17) != 0;
         }
 
-        public LedgerCsv.Entry toEntry() {
-            LedgerCsv.Entry e = new LedgerCsv.Entry();
+        public ArchiveCsv.Entry toEntry() {
+            ArchiveCsv.Entry e = new ArchiveCsv.Entry();
             e.timestamp = timestamp;
             e.temp = temp;
             e.humidity = humidity;
@@ -137,7 +137,7 @@ public final class BacklogDb extends SQLiteOpenHelper {
         }
     }
 
-    /** 장부 건수 요약. */
+    /** 보관함 건수 요약. */
     public static final class Stats {
         public int total;
         public int uploaded;
@@ -170,7 +170,7 @@ public final class BacklogDb extends SQLiteOpenHelper {
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
         if (oldVersion < 2) {
-            // v1 장부에는 전송 여부만 있었다. 기록 항목을 붙이고 전송 순서를 timestamp 순으로 바꾼다.
+            // v1 보관함에는 전송 여부만 있었다. 기록 항목을 붙이고 전송 순서를 timestamp 순으로 바꾼다.
             db.execSQL("ALTER TABLE samples ADD COLUMN uploaded_at INTEGER");
             db.execSQL("ALTER TABLE samples ADD COLUMN server_status TEXT");
             db.execSQL("ALTER TABLE samples ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0");
@@ -180,7 +180,7 @@ public final class BacklogDb extends SQLiteOpenHelper {
             db.execSQL("CREATE INDEX samples_pending ON samples(uploaded, ts)");
         }
         if (oldVersion < 3) {
-            // v2 까지 "데이터 없음" 은 별도 gaps 테이블에만 있었다. 장부로 옮긴다.
+            // v2 까지 "데이터 없음" 은 별도 gaps 테이블에만 있었다. 보관함으로 옮긴다.
             db.execSQL("ALTER TABLE samples ADD COLUMN no_data INTEGER NOT NULL DEFAULT 0");
             db.execSQL("INSERT OR IGNORE INTO samples "
                     + "(ts, temp, humidity, aqi, tvoc, eco2, received_at, source, no_data) "
@@ -253,7 +253,7 @@ public final class BacklogDb extends SQLiteOpenHelper {
     public static final class ImportResult {
         public int added;
         public int addedUploaded;
-        /** 장부에는 대기였지만 CSV 에 전송 완료로 기록돼 있어 완료로 바꾼 행. */
+        /** 보관함에는 대기였지만 CSV 에 전송 완료로 기록돼 있어 완료로 바꾼 행. */
         public int markedUploaded;
         /** 새로 기록한 "데이터 없음" 시각. */
         public int addedNoData;
@@ -263,15 +263,15 @@ public final class BacklogDb extends SQLiteOpenHelper {
     }
 
     /**
-     * CSV 에서 읽은 행을 장부에 합친다. 이미 있는 timestamp 는 값을 덮어쓰지 않고,
-     * CSV 쪽이 전송 완료면 장부도 전송 완료로 올린다(완료 → 대기로 내리지는 않는다).
+     * CSV 에서 읽은 행을 보관함에 합친다. 이미 있는 timestamp 는 값을 덮어쓰지 않고,
+     * CSV 쪽이 전송 완료면 보관함도 전송 완료로 올린다(완료 → 대기로 내리지는 않는다).
      */
-    public ImportResult importRows(List<LedgerCsv.Entry> entries) {
+    public ImportResult importRows(List<ArchiveCsv.Entry> entries) {
         ImportResult result = new ImportResult();
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
-            for (LedgerCsv.Entry e : entries) {
+            for (ArchiveCsv.Entry e : entries) {
                 ContentValues v = new ContentValues();
                 v.put("ts", e.timestamp);
                 v.put("temp", e.temp);
@@ -489,7 +489,7 @@ public final class BacklogDb extends SQLiteOpenHelper {
         return out;
     }
 
-    /** 장부 CSV 저장용 전체 행. timestamp 순. */
+    /** 보관함 CSV 저장용 전체 행. timestamp 순. */
     public List<Row> allRowsAscending() {
         List<Row> out = new ArrayList<>();
         try (Cursor c = getReadableDatabase().rawQuery(
